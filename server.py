@@ -193,12 +193,20 @@ _TOOLS = [
     ),
     Tool(
         name="docker_control",
-        description="Start, stop, or restart a Docker container. Requires explicit user confirmation before use.",
+        description=(
+            "Start, stop, or restart a Docker container. "
+            "stop and restart are destructive actions and require confirmed=true. "
+            "Always ask the user before setting confirmed=true."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
                 "action": {"type": "string", "description": "Action to perform: restart, stop, start"},
                 "name": {"type": "string", "description": "Container name or ID"},
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "Must be true for stop and restart. Set only after explicit user approval.",
+                },
             },
             "required": ["action", "name"],
         },

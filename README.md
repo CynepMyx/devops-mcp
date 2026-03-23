@@ -1,8 +1,10 @@
 # DevOps MCP
 
-A production-ready [Model Context Protocol](https://modelcontextprotocol.io/) server that gives AI assistants (Claude, Cursor, etc.) direct access to your Linux server — Docker containers, SSH execution, system health, logs, Nginx, Prometheus, and more.
+A self-hosted [Model Context Protocol](https://modelcontextprotocol.io/) server that gives AI assistants (Claude, Cursor, etc.) direct access to your Linux server — Docker containers, SSH execution, system health, logs, Nginx, Prometheus, and more.
 
 Deploy it once on your server. Connect any MCP-compatible client.
+
+> **Intended for trusted self-hosted environments.** Binds to `127.0.0.1` by default. Access to Docker socket and SSH gives the server significant power over your infrastructure — treat it accordingly.
 
 ---
 
@@ -37,7 +39,7 @@ Security is built in, not bolted on:
 - **Danger commands require confirmation** — `rm`, `reboot`, `systemctl stop`, etc. need `confirmed=true`
 - **Log path allowlist** — `log_tail` only reads from predefined safe paths
 - **Nginx container allowlist** — `nginx_test` only runs against approved container names
-- **DB query validation** — DDL/DML require explicit confirmation; GRANT/REVOKE blocked entirely
+- **docker_control requires confirmation** — `stop` and `restart` require `confirmed=true`; AI must ask user before proceeding
 - **Container runs as non-root** — `mcpuser` (UID 1000), read-only filesystem, all Linux capabilities dropped
 - **SSH key path validation** — only keys from `/app/keys/` are accepted
 - **Audit log** — every tool call is logged to `/audit/audit.jsonl` with timestamp and args
@@ -158,10 +160,6 @@ Docker SDK  Paramiko  psutil/dbus  httpx      Prometheus
 | `SERPAPI_KEY` | — | SerpAPI key for `search_web` |
 | `EXA_API_KEY` | — | Exa key for `search_ai` |
 | `PROMETHEUS_URL` | `http://host.docker.internal:9090` | Prometheus endpoint |
-| `ALLOWED_DB_HOST` | — | MySQL host for `db_query` |
-| `ALLOWED_DB_USER` | — | MySQL user |
-| `ALLOWED_DB_PASSWORD` | — | MySQL password |
-| `ALLOWED_DB_NAME` | — | MySQL database name |
 
 ---
 
