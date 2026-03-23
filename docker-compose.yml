@@ -1,0 +1,68 @@
+services:
+  mcp-server:
+    build:
+      context: .
+      args:
+        DOCKER_GID: ${DOCKER_GID:-999}
+    container_name: devops-mcp
+    restart: unless-stopped
+
+    ports:
+      - "127.0.0.1:8765:8765"
+
+    volumes:
+      - /opt/devops-mcp:/app
+      - /opt/devops-mcp/keys:/app/keys:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro
+      - /var/log:/var/log:ro
+      - audit_data:/audit
+
+    command: ["uvicorn", "server:_asgi_handler", "--host", "0.0.0.0", "--port", "8765"]
+
+    environment:
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8765
+      - AUDIT_LOG_PATH=/audit/audit.jsonl
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      - SERPAPI_KEY=${SERPAPI_KEY}
+      - EXA_API_KEY=${EXA_API_KEY}
+
+    cap_drop:
+      - ALL
+
+    security_opt:
+      - no-new-privileges:true
+
+    read_only: true
+
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    networks:
+      - mcp_net
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  audit_data:
+    driver: local
+
+networks:
+  mcp_net:
+    driver: bridge
