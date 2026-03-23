@@ -2,6 +2,7 @@ import importlib
 import json
 import os
 import sys
+import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -62,17 +63,18 @@ def _reload_tools() -> None:
     from tools.prometheus import prometheus_query, prometheus_targets
     from tools.search_tools import search_web, search_ai
     from tools.server_health import get_server_health
-    _DISPATCH.update({
-        "system_info": get_system_info, "docker_list": get_docker_list,
-        "docker_logs": get_docker_logs, "docker_inspect": get_docker_inspect,
-        "tls_check": check_tls, "log_tail": tail_log,
-        "nginx_test": run_nginx_test, "systemd_status": get_systemd_status,
-        "docker_control": docker_control, "docker_stats": get_docker_stats,
-        "ssh_exec": ssh_exec, "prometheus_query": prometheus_query,
-        "prometheus_targets": prometheus_targets,
-        "search_web": search_web, "search_ai": search_ai,
-        "server_health": get_server_health,
-    })
+    with _DISPATCH_LOCK:
+        _DISPATCH.update({
+            "system_info": get_system_info, "docker_list": get_docker_list,
+            "docker_logs": get_docker_logs, "docker_inspect": get_docker_inspect,
+            "tls_check": check_tls, "log_tail": tail_log,
+            "nginx_test": run_nginx_test, "systemd_status": get_systemd_status,
+            "docker_control": docker_control, "docker_stats": get_docker_stats,
+            "ssh_exec": ssh_exec, "prometheus_query": prometheus_query,
+            "prometheus_targets": prometheus_targets,
+            "search_web": search_web, "search_ai": search_ai,
+            "server_health": get_server_health,
+        })
     print("[watcher] tools reloaded", flush=True)
 
 
@@ -318,6 +320,8 @@ _TOOLS = [
     ),
 ]
 
+_DISPATCH_LOCK = threading.Lock()
+
 _DISPATCH = {
     "system_info": get_system_info,
     "docker_list": get_docker_list,
@@ -374,9 +378,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     status = "ok"
 
     try:
-        if name not in _DISPATCH:
+        with _DISPATCH_LOCK:
+            handler = _DISPATCH.get(name)
+        if handler is None:
             raise ValueError(f"Unknown tool: {name}")
-        result = await _DISPATCH[name](arguments)
+        result = await handler(arguments)
         text = json.dumps(result, ensure_ascii=False, indent=2)
         return [TextContent(type="text", text=text)]
     except Exception as e:
