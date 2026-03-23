@@ -69,7 +69,13 @@ def _run_ssh(
             connect_kwargs["password"] = password
         else:
             connect_kwargs["key_filename"] = key_path
-        client.connect(**connect_kwargs)
+        try:
+            client.connect(**connect_kwargs)
+        except paramiko.AuthenticationException:
+            raise paramiko.AuthenticationException("Authentication failed")
+        finally:
+            # Clear password from local scope so it never appears in tracebacks
+            connect_kwargs.pop("password", None)
         stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
         out = stdout.read().decode(errors="replace")
         err = stderr.read().decode(errors="replace")
@@ -132,3 +138,6 @@ async def ssh_exec(args: dict) -> dict:
         return {"error": f"SSH timed out after {timeout}s"}
     except paramiko.SSHException as e:
         return {"error": f"SSH error: {e}"}
+    except Exception as e:
+        logger.error("Unexpected ssh_exec error: %s", type(e).__name__)
+        return {"error": f"Unexpected error: {type(e).__name__}"}

@@ -115,15 +115,17 @@ def validate_ssh_command(command: str, confirmed: bool) -> None:
     for pattern in _SHELL_INJECTION_PATTERNS:
         if pattern in command:
             raise ValueError(f"Shell injection pattern detected: {pattern!r}")
-    # Block redirects to absolute paths (> /path and >> /path, with or without spaces)
-    if re.search(r'>>\s*/', command) or re.search(r'(?<![>])>\s*/', command):
-        raise ValueError("Redirect to absolute path is not allowed")
+    # Block any output redirect (> or >>) regardless of target path
+    if re.search(r'>{1,2}\s*\S', command):
+        raise ValueError("Output redirection is not allowed")
     cmd_lower = command.strip().lower()
     for prefix in _DANGER_PREFIXES:
-        if cmd_lower == prefix.rstrip() or cmd_lower.startswith(prefix):
+        token = prefix.strip()
+        # Match at command start or after shell word separators — catches `sudo rm`, `env rm`, etc.
+        if re.search(r'(?:^|[\s|;&])' + re.escape(token) + r'(?:\s|$)', cmd_lower):
             if not confirmed:
                 raise ValueError(
-                    f"Dangerous command '{prefix.strip()}'. "
+                    f"Dangerous command '{token}'. "
                     "Repeat with confirmed=true after user approval."
                 )
             return
