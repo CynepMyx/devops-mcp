@@ -40,6 +40,10 @@ def _fetch_stats(name: str) -> dict:
                 "tx_mb": round(net_tx / 1024 ** 2, 3),
             },
         }
+    except docker.errors.NotFound:
+        return {"error": f"Container not found: {name}"}
+    except docker.errors.DockerException as e:
+        return {"error": f"Docker error: {e}"}
     finally:
         client.close()
 

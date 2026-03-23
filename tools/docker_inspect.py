@@ -51,6 +51,10 @@ def _fetch_inspect(name: str) -> dict:
             "mounts": mounts,
             "env": env,
         }
+    except docker.errors.NotFound:
+        return {"error": f"Container not found: {name}"}
+    except docker.errors.DockerException as e:
+        return {"error": f"Docker error: {e}"}
     finally:
         client.close()
 

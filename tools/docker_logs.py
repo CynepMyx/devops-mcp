@@ -20,6 +20,10 @@ def _fetch_logs(name: str, lines: int, since: int | None, grep: str | None) -> d
             "lines_returned": len(log_lines),
             "logs": log_lines,
         }
+    except docker.errors.NotFound:
+        return {"error": f"Container not found: {name}"}
+    except docker.errors.DockerException as e:
+        return {"error": f"Docker error: {e}"}
     finally:
         client.close()
 
