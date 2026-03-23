@@ -1,6 +1,7 @@
 import asyncio
 import os
 import docker
+import docker.errors
 
 # Read protected containers from env; defaults to devops-mcp
 _protected_raw = os.environ.get("PROTECTED_CONTAINERS", "devops-mcp")
@@ -55,4 +56,7 @@ async def docker_control(args: dict) -> dict:
             )
         }
 
-    return await asyncio.to_thread(_control, action, name)
+    try:
+        return await asyncio.to_thread(_control, action, name)
+    except Exception as e:
+        return {"error": str(e)}

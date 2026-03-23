@@ -13,6 +13,7 @@ services:
     volumes:
       - /opt/devops-mcp:/app
       - /opt/devops-mcp/keys:/app/keys:ro
+      - /opt/devops-mcp/ssh:/app/ssh:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro
       - /var/log:/var/log:ro
@@ -24,6 +25,7 @@ services:
       - MCP_HOST=0.0.0.0
       - MCP_PORT=8765
       - AUDIT_LOG_PATH=/audit/audit.jsonl
+      - SSH_KNOWN_HOSTS=/app/ssh/known_hosts
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
       - SERPAPI_KEY=${SERPAPI_KEY}

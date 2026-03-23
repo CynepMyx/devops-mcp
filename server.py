@@ -297,7 +297,9 @@ _TOOLS = [
             "Execute a command on a remote server via SSH. "
             "Key must be located under /app/keys/. "
             "Dangerous commands (rm, reboot, shutdown, systemctl start/stop/restart, etc.) "
-            "require confirmed=true — only set this after explicit user approval."
+            "require confirmed=true — only set this after explicit user approval. "
+            "By default connects with warn policy (unknown hosts are allowed but reported). "
+            "Set verify_host_key=true to reject hosts not in /app/ssh/known_hosts."
         ),
         inputSchema={
             "type": "object",
@@ -309,6 +311,7 @@ _TOOLS = [
                 "command": {"type": "string", "description": "Command to execute (max 500 chars, no shell injection)"},
                 "timeout": {"type": "integer", "description": "Timeout in seconds (default 30, max 120)"},
                 "confirmed": {"type": "boolean", "description": "Set to true to allow dangerous commands after user approval"},
+                "verify_host_key": {"type": "boolean", "description": "Reject unknown hosts not in /app/ssh/known_hosts (default: false)"},
             },
             "required": ["host", "user", "command"],
         },

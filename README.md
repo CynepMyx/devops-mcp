@@ -120,6 +120,23 @@ ssh_exec(host="10.0.0.5", user="deploy", key="/app/keys/my-server.pem", command=
 
 ---
 
+## SSH Host Key Verification
+
+By default,  connects with **warn mode**: unknown hosts are allowed but a warning appears in the response. This is convenient but not strict.
+
+To enable **strict mode**, populate :
+
+```bash
+# On your host machine, scan the target server and append to known_hosts
+ssh-keyscan -H 10.0.0.5 >> /opt/devops-mcp/ssh/known_hosts
+```
+
+Then pass  in . Hosts not in  will be rejected.
+
+> The  file is mounted read-only into the container and gitignored — it never ends up in source control.
+
+---
+
 ## Example Prompts
 
 Once connected, you can ask your AI assistant things like:
