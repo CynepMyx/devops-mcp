@@ -11,7 +11,7 @@ services:
       - "127.0.0.1:8765:8765"
 
     volumes:
-      - /opt/devops-mcp:/app
+      - /opt/devops-mcp:/app:ro
       - /opt/devops-mcp/keys:/app/keys:ro
       - /opt/devops-mcp/ssh:/app/ssh:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro

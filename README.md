@@ -42,6 +42,7 @@ Security is built in, not bolted on:
 - **docker_control requires confirmation** — `stop` and `restart` require `confirmed=true`; AI must ask user before proceeding
 - **Container runs as non-root** — `mcpuser` (UID 1000), read-only filesystem, all Linux capabilities dropped
 - **SSH key path validation** — only keys from `/app/keys/` are accepted
+- **TLS check port allowlist** — `tls_check` only connects to ports: `80, 443, 465, 993, 995, 8080, 8443`
 - **Audit log** — every tool call is logged to `/audit/audit.jsonl` with timestamp and args
 
 ---
