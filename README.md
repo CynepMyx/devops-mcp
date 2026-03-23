@@ -180,6 +180,19 @@ Docker SDK  Paramiko  psutil/dbus  httpx      Prometheus
 
 ---
 
+## Security & Threat Model
+
+DevOps MCP is designed for **trusted self-hosted environments**. Read [SECURITY.md](SECURITY.md) for the full threat model.
+
+**Key constraints:**
+- Binds to `127.0.0.1` by default — not exposed to the internet
+- Docker socket access is intentional and powerful — treat the endpoint accordingly
+- SSH keys are validated against a path allowlist (`/app/keys/`)
+- Destructive actions (`stop`, `restart`, dangerous shell commands) require explicit `confirmed=true`
+- Every tool call is appended to `/audit/audit.jsonl`
+
+---
+
 ## License
 
 MIT

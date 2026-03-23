@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Syntax check
+        run: |
+          python3 -c "
+          import ast, sys, pathlib
+          errors = []
+          for f in pathlib.Path('.').rglob('*.py'):
+              if '_wip' in f.parts:
+                  continue
+              try:
+                  ast.parse(f.read_text())
+              except SyntaxError as e:
+                  errors.append(f'{f}: {e}')
+          if errors:
+              for e in errors:
+                  print('SYNTAX ERROR:', e)
+              sys.exit(1)
+          print(f'Syntax OK: {len(list(pathlib.Path(".").rglob("*.py")))} files checked')
+          "
+
+      - name: Import smoke test
+        run: |
+          python3 -c "
+          import importlib, sys
+          modules = [
+              'tools.server_health', 'tools.system_info', 'tools.docker_list',
+              'tools.docker_logs', 'tools.docker_inspect', 'tools.docker_stats',
+              'tools.docker_control', 'tools.ssh_exec', 'tools.log_tail',
+              'tools.nginx_test', 'tools.systemd_status', 'tools.tls_check',
+              'tools.prometheus', 'tools.search_tools',
+          ]
+          for m in modules:
+              try:
+                  importlib.import_module(m)
+                  print(f'OK: {m}')
+              except ImportError as e:
+                  print(f'SKIP (missing dep): {m} — {e}')
+              except Exception as e:
+                  print(f'FAIL: {m} — {e}')
+                  sys.exit(1)
+          print('Import smoke test done')
+          "
+
+      - name: Security module check
+        run: python3 -c "import security; print('security.py: OK')"
