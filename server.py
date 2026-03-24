@@ -78,7 +78,12 @@ def _reload_tools() -> None:
     print("[watcher] tools reloaded", flush=True)
 
 
+_HOT_RELOAD = os.environ.get("DEV_HOT_RELOAD", "false").lower() == "true"
+
+
 def _start_watcher() -> None:
+    if not _HOT_RELOAD:
+        return
     try:
         from watchdog.observers import Observer
         from watchdog.events import FileSystemEventHandler
