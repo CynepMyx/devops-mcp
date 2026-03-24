@@ -29,3 +29,6 @@ jobs:
 
       - name: Security module check
         run: python3 -c "import security; print('security.py OK')"
+
+      - name: Unit tests
+        run: python3 -m pytest tests/ -v --tb=short
