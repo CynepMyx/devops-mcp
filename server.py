@@ -367,8 +367,8 @@ def _write_audit(tool: str, args: dict, status: str, error: str | None, duration
         os.makedirs(os.path.dirname(AUDIT_LOG_PATH), exist_ok=True)
         with open(AUDIT_LOG_PATH, "a") as f:
             f.write(json.dumps(record) + "\n")
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("audit write failed: %s", exc)
 
 
 @mcp_server.list_tools()
