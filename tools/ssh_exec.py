@@ -9,6 +9,7 @@ import paramiko
 from security import validate_ssh_key_path, validate_ssh_command
 
 KNOWN_HOSTS_PATH = os.environ.get("SSH_KNOWN_HOSTS", "/app/ssh/known_hosts")
+ALLOW_SSH_PASSWORD = os.environ.get("ALLOW_SSH_PASSWORD", "false").lower() == "true"
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,8 @@ async def ssh_exec(args: dict) -> dict:
         return {"error": "Parameter 'host' is required"}
     if not user:
         return {"error": "Parameter 'user' is required"}
+    if password and not ALLOW_SSH_PASSWORD:
+        return {"error": "Password authentication is disabled. Set ALLOW_SSH_PASSWORD=true to enable."}
     if not key_path and not password:
         return {"error": "Parameter 'key' or 'password' is required"}
     if not command:
