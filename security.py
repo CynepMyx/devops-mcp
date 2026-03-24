@@ -21,6 +21,52 @@ LOG_PATH_ALLOWLIST_PREFIXES = [
 
 ALLOWED_PORTS = frozenset([443, 80, 8443, 8080, 465, 993, 995])
 
+# ---------------------------------------------------------------------------
+# SSH command validation — read-only allowlist model
+#
+# Without confirmed=true only explicitly safe, read-only patterns are allowed.
+# Everything else is considered potentially mutating and requires confirmation.
+# Injection patterns and output redirects are always blocked regardless.
+# ---------------------------------------------------------------------------
+
+# Single-word commands that are always read-only.
+_SAFE_SINGLE = frozenset({
+    # System info
+    "uptime", "df", "free", "ps", "top", "htop", "vmstat", "iostat",
+    "netstat", "lsof", "who", "w", "last", "lastb",
+    # File reading
+    "cat", "head", "tail", "less", "more", "wc", "sort", "uniq", "cut",
+    "grep", "egrep", "fgrep", "awk", "sed",
+    # Filesystem inspection (read-only)
+    "ls", "ll", "find", "stat", "file", "du", "lsblk", "tree",
+    # Kernel / system logs
+    "journalctl", "dmesg",
+    # Network diagnostics
+    "ping", "traceroute", "tracepath", "nslookup", "dig", "host",
+    "curl", "wget", "ss", "ip", "ifconfig",
+    # Identity / environment
+    "whoami", "id", "hostname", "uname", "date", "cal",
+    "printenv", "which", "whereis", "type",
+    # Misc safe
+    "echo", "true", "false",
+})
+
+# Two-word prefixes for commands whose safety depends on the subcommand.
+# Only the listed subcommands are allowed without confirmation.
+_SAFE_TWO_WORD = frozenset({
+    # systemctl — status queries only
+    "systemctl status", "systemctl list-units", "systemctl list-services",
+    "systemctl is-active", "systemctl is-enabled", "systemctl is-failed",
+    "systemctl show",
+    # docker — read-only subcommands
+    "docker ps", "docker images", "docker logs", "docker inspect",
+    "docker stats", "docker top", "docker port", "docker diff",
+    "docker version", "docker info", "docker network",
+})
+
+# Always-blocked patterns regardless of confirmed (command injection / redirects).
+_INJECTION_PATTERNS = ("$(", "`")
+
 
 def validate_log_path(path: str) -> Path:
     if "\x00" in path:
@@ -52,24 +98,6 @@ def validate_nginx_container(name: str) -> None:
         raise ValueError(f"Invalid container name format: {name}")
     if name not in NGINX_CONTAINER_ALLOWLIST:
         raise PermissionError(f"Container not in allowlist: {name}")
-
-
-_DANGER_PREFIXES = (
-    "rm ", "reboot", "shutdown", "halt", "poweroff",
-    "apt install", "apt remove", "apt purge", "apt upgrade",
-    "useradd", "userdel", "usermod", "passwd",
-    "chmod", "chown", "kill ", "killall", "pkill",
-    "dd ", "mkfs", "fdisk",
-    "systemctl start", "systemctl stop", "systemctl restart",
-    "systemctl enable", "systemctl disable",
-    "crontab -r", "iptables -F", "iptables -D", "iptables -A",
-    "bash -c", "sh -c", "python3 -c", "python -c", "perl -e",
-)
-
-# Only block true injection patterns (command substitution).
-# Shell operators &&, ;, || are legitimate and allowed — the remote shell
-# interprets them naturally.
-_SHELL_INJECTION_PATTERNS = ("$(", "`")
 
 
 _DB_READ_PREFIXES = frozenset(('select', 'show', 'describe', 'desc', 'explain', 'with'))
@@ -109,26 +137,50 @@ def validate_ssh_key_path(path: str) -> None:
         raise PermissionError(f"Invalid characters in key filename: {filename}")
 
 
+def _is_subcommand_safe(cmd: str) -> bool:
+    """Return True if a single shell command (no operators) is read-only safe."""
+    tokens = cmd.strip().split()
+    if not tokens:
+        return True
+    first = tokens[0].lower()
+    # Check two-word prefix first (more specific match)
+    if len(tokens) >= 2:
+        two = f"{first} {tokens[1].lower()}"
+        if two in _SAFE_TWO_WORD:
+            return True
+    return first in _SAFE_SINGLE
+
+
+def _split_shell_commands(command: str) -> list[str]:
+    """Split a shell command string into individual commands by shell operators."""
+    # Split on ||, |, &&, ; — order matters: || before |
+    return re.split(r'\|\||&&|[|;]', command)
+
+
 def validate_ssh_command(command: str, confirmed: bool) -> None:
     if len(command) > 500:
         raise ValueError("Command exceeds maximum length of 500 characters")
-    for pattern in _SHELL_INJECTION_PATTERNS:
+
+    # Always block command injection patterns
+    for pattern in _INJECTION_PATTERNS:
         if pattern in command:
             raise ValueError(f"Shell injection pattern detected: {pattern!r}")
-    # Block any output redirect (> or >>) regardless of target path
+
+    # Always block output redirection
     if re.search(r'>{1,2}\s*\S', command):
         raise ValueError("Output redirection is not allowed")
-    cmd_lower = command.strip().lower()
-    for prefix in _DANGER_PREFIXES:
-        token = prefix.strip()
-        # Match at command start or after shell word separators — catches `sudo rm`, `env rm`, etc.
-        if re.search(r'(?:^|[\s|;&])' + re.escape(token) + r'(?:\s|$)', cmd_lower):
-            if not confirmed:
-                raise ValueError(
-                    f"Dangerous command '{token}'. "
-                    "Repeat with confirmed=true after user approval."
-                )
-            return
+
+    # Read-only allowlist check: every sub-command must be safe or confirmed required
+    sub_commands = _split_shell_commands(command)
+    unsafe = [sc.strip() for sc in sub_commands if sc.strip() and not _is_subcommand_safe(sc)]
+
+    if unsafe:
+        if not confirmed:
+            examples = ", ".join(repr(sc.split()[0]) for sc in unsafe[:3] if sc.split())
+            raise ValueError(
+                f"Command requires confirmation ({examples} is not in the read-only allowlist). "
+                "Repeat with confirmed=true after user approval."
+            )
 
 
 def validate_host_port(host: str, port: int) -> None:
