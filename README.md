@@ -178,6 +178,8 @@ Docker SDK  Paramiko  psutil/dbus  httpx      Prometheus
 | `SERPAPI_KEY` | — | SerpAPI key for `search_web` |
 | `EXA_API_KEY` | — | Exa key for `search_ai` |
 | `PROMETHEUS_URL` | `http://host.docker.internal:9090` | Prometheus endpoint |
+| `ALLOW_SSH_PASSWORD` | `false` | Enable SSH password auth (key-based is default) |
+| `DEV_HOT_RELOAD` | `false` | Enable live tool file-watching (dev only) |
 
 ---
 
