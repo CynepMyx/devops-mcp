@@ -30,6 +30,10 @@ services:
       - PYTHONDONTWRITEBYTECODE=1
       - SERPAPI_KEY=${SERPAPI_KEY}
       - EXA_API_KEY=${EXA_API_KEY}
+      - PROMETHEUS_URL=${PROMETHEUS_URL:-http://host.docker.internal:9090}
+      - PROTECTED_CONTAINERS=${PROTECTED_CONTAINERS:-devops-mcp}
+      - ALLOW_SSH_PASSWORD=${ALLOW_SSH_PASSWORD:-false}
+      - DEV_HOT_RELOAD=${DEV_HOT_RELOAD:-false}
 
     cap_drop:
       - ALL
