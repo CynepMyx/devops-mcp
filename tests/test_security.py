@@ -265,12 +265,9 @@ class TestLogPath:
         with pytest.raises(PermissionError, match="allowlist"):
             validate_log_path(path)
 
-    def test_valid_syslog(self, tmp_path, monkeypatch):
-        # Patch Path.resolve to return the path itself so we don't need real /var/log
+    def test_valid_syslog(self, monkeypatch):
         import pathlib
-        fake = tmp_path / "syslog"
-        fake.write_text("log content")
-        monkeypatch.setattr(pathlib.Path, "resolve", lambda self: fake)
-        # /var/log/syslog is in allowlist — should pass after monkeypatching resolve
+        monkeypatch.setattr(pathlib.Path, "exists", lambda self: True)
+        monkeypatch.setattr(pathlib.Path, "is_file", lambda self: True)
         result = validate_log_path("/var/log/syslog")
-        assert result == fake
+        assert str(result) == "/var/log/syslog"
