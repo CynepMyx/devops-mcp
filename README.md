@@ -35,8 +35,8 @@ Deploy it once on your server. Connect any MCP-compatible client.
 
 Security is built in, not bolted on:
 
-- **SSH injection protection** — blocks command substitution, backticks; allows shell operators
-- **Danger commands require confirmation** — `rm`, `reboot`, `systemctl stop`, etc. need `confirmed=true`
+- **SSH commands are read-only by default** — only safe, read-only commands allowed without `confirmed=true` (uptime, df, cat, grep, journalctl, `systemctl status`, `docker ps`, etc.)
+- **Conditionally safe commands** — `sed`, `curl`, `wget`, `find` allowed only without mutating flags; `sed -i`, `curl -X POST`, `find -exec` require `confirmed=true`
 - **Log path allowlist** — `log_tail` only reads from predefined safe paths
 - **Nginx container allowlist** — `nginx_test` only runs against approved container names
 - **docker_control requires confirmation** — `stop` and `restart` require `confirmed=true`; AI must ask user before proceeding

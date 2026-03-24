@@ -1,5 +1,6 @@
 import importlib
 import json
+import logging
 import os
 import sys
 import threading
@@ -12,6 +13,8 @@ from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from mcp.types import TextContent, Tool
 import uvicorn
+
+logger = logging.getLogger(__name__)
 
 from tools.system_info import get_system_info
 from tools.docker_list import get_docker_list

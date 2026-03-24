@@ -29,27 +29,45 @@ ALLOWED_PORTS = frozenset([443, 80, 8443, 8080, 465, 993, 995])
 # Injection patterns and output redirects are always blocked regardless.
 # ---------------------------------------------------------------------------
 
-# Single-word commands that are always read-only.
+# Single-word commands that are unconditionally read-only.
+# Commands that can mutate state via flags (sed -i, curl -X POST, wget --post-data,
+# find -exec, awk system()) are intentionally excluded and handled separately below.
 _SAFE_SINGLE = frozenset({
     # System info
     "uptime", "df", "free", "ps", "top", "htop", "vmstat", "iostat",
     "netstat", "lsof", "who", "w", "last", "lastb",
-    # File reading
+    # File reading (no mutating flags possible for these)
     "cat", "head", "tail", "less", "more", "wc", "sort", "uniq", "cut",
-    "grep", "egrep", "fgrep", "awk", "sed",
-    # Filesystem inspection (read-only)
-    "ls", "ll", "find", "stat", "file", "du", "lsblk", "tree",
+    "grep", "egrep", "fgrep",
+    # Filesystem inspection (read-only, no -exec/-delete)
+    "ls", "ll", "stat", "file", "du", "lsblk", "tree",
     # Kernel / system logs
     "journalctl", "dmesg",
-    # Network diagnostics
+    # Network diagnostics (read-only: ping, traceroute, dns)
     "ping", "traceroute", "tracepath", "nslookup", "dig", "host",
-    "curl", "wget", "ss", "ip", "ifconfig",
+    "ss", "ip", "ifconfig",
     # Identity / environment
     "whoami", "id", "hostname", "uname", "date", "cal",
     "printenv", "which", "whereis", "type",
     # Misc safe
     "echo", "true", "false",
 })
+
+# Tokens/substrings that make otherwise-safe commands mutating.
+# Keyed by command name; any occurrence of any value in the full command → require confirmed.
+# Note: awk is excluded entirely (its program text can contain system() calls which
+# are too complex to validate reliably — it goes straight to confirmed=true).
+_MUTATING_TOKENS: dict[str, tuple[str, ...]] = {
+    "sed":  ("-i", "--in-place"),
+    "curl": ("-x ", "--request ", "-d ", "--data", "--upload-file", "-t ",
+             "-f ", "--form", "--output", "-o "),
+    "wget": ("--post-data", "--post-file", "-o ", "--output-document",
+             "--ftp-user", "--execute"),
+    "find": ("-exec ", "-execdir ", "-delete", "-ok ", "-okdir "),
+}
+
+# Commands allowed only when no mutating token is present.
+_CONDITIONALLY_SAFE = frozenset(_MUTATING_TOKENS.keys())
 
 # Two-word prefixes for commands whose safety depends on the subcommand.
 # Only the listed subcommands are allowed without confirmation.
@@ -143,12 +161,24 @@ def _is_subcommand_safe(cmd: str) -> bool:
     if not tokens:
         return True
     first = tokens[0].lower()
-    # Check two-word prefix first (more specific match)
+
+    # Check two-word prefix first (more specific match for systemctl/docker)
     if len(tokens) >= 2:
         two = f"{first} {tokens[1].lower()}"
         if two in _SAFE_TWO_WORD:
             return True
-    return first in _SAFE_SINGLE
+
+    # Unconditionally safe single-word commands
+    if first in _SAFE_SINGLE:
+        return True
+
+    # Conditionally safe: allowed only when no mutating tokens appear in the full cmd
+    if first in _CONDITIONALLY_SAFE:
+        cmd_lower = cmd.lower()
+        mutating = _MUTATING_TOKENS[first]
+        return not any(tok in cmd_lower for tok in mutating)
+
+    return False
 
 
 def _split_shell_commands(command: str) -> list[str]:

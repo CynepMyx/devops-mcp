@@ -53,6 +53,52 @@ class TestSshCommandSafe:
         validate_ssh_command(cmd, confirmed=False)  # must not raise
 
 
+class TestSshCommandConditionallyAllowlisted:
+    """Commands safe only when no mutating flags are present (P1 regression tests)."""
+
+    @pytest.mark.parametrize("cmd", [
+        # sed: read-only usage
+        "sed 's/foo/bar/' file.txt",
+        "sed -n '10,20p' /var/log/syslog",
+        # curl: GET only
+        "curl http://localhost:8080/health",
+        "curl -s http://localhost/metrics",
+        "curl -v https://example.com",
+        # wget: read-only
+        "wget http://localhost/check",
+        # find: no -exec/-delete
+        "find /var/log -name '*.log' -maxdepth 2",
+        "find /tmp -type f -mtime +7",
+    ])
+    def test_conditionally_safe_without_confirmed(self, cmd):
+        validate_ssh_command(cmd, confirmed=False)
+
+    @pytest.mark.parametrize("cmd", [
+        # sed: in-place edit
+        "sed -i 's/foo/bar/' file.txt",
+        "sed --in-place 's/x/y/' /etc/hosts",
+        # curl: state-mutating
+        "curl -X POST http://api/endpoint",
+        "curl -d 'data=x' http://api/",
+        "curl --data 'x=y' http://api/",
+        "curl -o /tmp/output http://x/",
+        "curl --output /tmp/out http://x/",
+        # wget: state-mutating
+        "wget --post-data=x http://x/",
+        "wget -O /tmp/file http://x/",
+        "wget --output-document=/tmp/x http://x/",
+        # find: execution
+        "find / -exec rm -rf {} ;",
+        "find / -execdir ls {} ;",
+        "find /tmp -delete",
+        # awk: requires confirmed (can shell out via system())
+        "awk '{print}' file.txt",
+    ])
+    def test_ambiguous_commands_require_confirmed(self, cmd):
+        with pytest.raises(ValueError, match="confirmed"):
+            validate_ssh_command(cmd, confirmed=False)
+
+
 class TestSshCommandRequiresConfirmed:
     """Commands that require confirmed=true."""
 
@@ -186,3 +232,45 @@ class TestNginxContainer:
     def test_invalid_format(self):
         with pytest.raises(ValueError):
             validate_nginx_container("nginx; rm -rf /")
+
+
+# ---------------------------------------------------------------------------
+# validate_log_path
+# ---------------------------------------------------------------------------
+
+from security import validate_log_path
+import tempfile
+
+
+class TestLogPath:
+    def test_null_byte(self):
+        with pytest.raises(PermissionError, match="Null byte"):
+            validate_log_path("/var/log/syslog\x00")
+
+    def test_path_traversal(self):
+        with pytest.raises(PermissionError, match="traversal"):
+            validate_log_path("/var/log/../etc/passwd")
+
+    def test_glob_chars(self):
+        with pytest.raises(PermissionError, match="Glob"):
+            validate_log_path("/var/log/*.log")
+
+    @pytest.mark.parametrize("path", [
+        "/etc/passwd",
+        "/tmp/something",
+        "/home/user/file.log",
+        "/var/log/mysql/error.log",  # not in allowlist
+    ])
+    def test_not_in_allowlist(self, path):
+        with pytest.raises(PermissionError, match="allowlist"):
+            validate_log_path(path)
+
+    def test_valid_syslog(self, tmp_path, monkeypatch):
+        # Patch Path.resolve to return the path itself so we don't need real /var/log
+        import pathlib
+        fake = tmp_path / "syslog"
+        fake.write_text("log content")
+        monkeypatch.setattr(pathlib.Path, "resolve", lambda self: fake)
+        # /var/log/syslog is in allowlist — should pass after monkeypatching resolve
+        result = validate_log_path("/var/log/syslog")
+        assert result == fake
