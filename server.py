@@ -305,9 +305,12 @@ _TOOLS = [
         name="ssh_exec",
         description=(
             "Execute a command on a remote server via SSH. "
+            "SSH commands are read-only by default: only safe commands (uptime, df, cat, grep, "
+            "journalctl, systemctl status, docker ps, etc.) are allowed without confirmed=true. "
+            "Conditionally safe commands (sed, curl, wget, find) are allowed only without mutating "
+            "flags (e.g. sed -i, curl -X POST, find -exec require confirmed=true). "
+            "All other commands require confirmed=true — always ask the user before setting it. "
             "Key must be located under /app/keys/. "
-            "Dangerous commands (rm, reboot, shutdown, systemctl start/stop/restart, etc.) "
-            "require confirmed=true — only set this after explicit user approval. "
             "By default connects with warn policy (unknown hosts are allowed but reported). "
             "Set verify_host_key=true to reject hosts not in /app/ssh/known_hosts."
         ),
@@ -320,7 +323,7 @@ _TOOLS = [
                 "password": {"type": "string", "description": "SSH password (alternative to key)"},
                 "command": {"type": "string", "description": "Command to execute (max 500 chars, no shell injection)"},
                 "timeout": {"type": "integer", "description": "Timeout in seconds (default 30, max 120)"},
-                "confirmed": {"type": "boolean", "description": "Set to true to allow dangerous commands after user approval"},
+                "confirmed": {"type": "boolean", "description": "Set to true to allow commands outside the read-only allowlist, after explicit user approval"},
                 "verify_host_key": {"type": "boolean", "description": "Reject unknown hosts not in /app/ssh/known_hosts (default: false)"},
             },
             "required": ["host", "user", "command"],

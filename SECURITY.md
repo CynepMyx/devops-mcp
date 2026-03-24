@@ -5,18 +5,21 @@
 DevOps MCP is designed for **trusted self-hosted environments**. It is not a public-facing service.
 
 **What it protects against:**
-- SSH command injection (blocks `$(...)`, backticks)
-- Path traversal in log access
-- Unauthorized Docker container control (confirmation required for destructive actions)
-- Privilege escalation (non-root container, all capabilities dropped)
-- Audit trail gaps (every call logged to `/audit/audit.jsonl`)
+- **SSH read-only by default** — only safe, read-only commands are allowed without `confirmed=true` (uptime, df, cat, grep, journalctl, systemctl status, docker ps, etc.)
+- **Conditionally safe commands** — `sed`, `curl`, `wget`, `find` allowed only when no mutating flags are present (`sed -i`, `curl -X POST`, `find -exec` require `confirmed=true`)
+- **SSH command injection** — blocks `$(...)` and backtick substitution; output redirection always blocked
+- **Path traversal in log access** — `log_tail` resolves symlinks and checks against an allowlist
+- **Unauthorized Docker container control** — `stop` and `restart` require `confirmed=true`
+- **Privilege escalation** — non-root container (mcpuser), all Linux capabilities dropped, read-only rootfs
+- **Audit trail** — every tool call logged to `/audit/audit.jsonl`; write failures emit a warning instead of being silently swallowed
+- **SSH password auth disabled** — password authentication off by default (ALLOW_SSH_PASSWORD=false)
 
 **What it does NOT protect against:**
 - A compromised AI client with access to the MCP endpoint
 - Insider threats with physical access to the server
 - Docker socket abuse — mounting `/var/run/docker.sock` gives significant host access by design
 
-**Intended deployment:** localhost-only (`127.0.0.1:8765`), accessed via SSH tunnel from a trusted machine.
+**Intended deployment:** localhost-only (127.0.0.1:8765), accessed via SSH tunnel from a trusted machine.
 
 ## Reporting a Vulnerability
 
