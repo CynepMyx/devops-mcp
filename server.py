@@ -30,6 +30,7 @@ from tools.ssh_exec import ssh_exec
 from tools.prometheus import prometheus_query, prometheus_targets
 from tools.search_tools import search_web, search_ai
 from tools.server_health import get_server_health
+from tools.db_query import db_query
 
 AUDIT_LOG_PATH = os.environ.get("AUDIT_LOG_PATH", "/audit/audit.jsonl")
 MCP_HOST = os.environ.get("MCP_HOST", "127.0.0.1")
@@ -42,6 +43,7 @@ _TOOL_MODULES = [
     "tools.docker_stats", "tools.ssh_exec", "tools.prometheus",
     "tools.search_tools",
     "tools.server_health",
+    "tools.db_query",
 ]
 
 
@@ -66,6 +68,7 @@ def _reload_tools() -> None:
     from tools.prometheus import prometheus_query, prometheus_targets
     from tools.search_tools import search_web, search_ai
     from tools.server_health import get_server_health
+    from tools.db_query import db_query
     with _DISPATCH_LOCK:
         _DISPATCH.update({
             "system_info": get_system_info, "docker_list": get_docker_list,
@@ -77,6 +80,7 @@ def _reload_tools() -> None:
             "prometheus_targets": prometheus_targets,
             "search_web": search_web, "search_ai": search_ai,
             "server_health": get_server_health,
+            "db_query": db_query,
         })
     print("[watcher] tools reloaded", flush=True)
 
@@ -329,6 +333,25 @@ _TOOLS = [
             "required": ["host", "user", "command"],
         },
     ),
+    Tool(
+        name="db_query",
+        description="Execute SQL query on PostgreSQL or MySQL database. Read-only queries (SELECT, SHOW, DESCRIBE, EXPLAIN) work without confirmation. Write queries require confirmed=true. GRANT/REVOKE/user management always blocked.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "enum": ["postgres", "mysql"], "description": "Database type (default: postgres)"},
+                "host": {"type": "string", "description": "Database host IP or hostname"},
+                "port": {"type": "integer", "description": "Port (default: 5432 for postgres, 3306 for mysql)"},
+                "user": {"type": "string", "description": "Database username"},
+                "password": {"type": "string", "description": "Database password"},
+                "database": {"type": "string", "description": "Database name"},
+                "query": {"type": "string", "description": "SQL query (max 10000 chars)"},
+                "timeout": {"type": "integer", "description": "Query timeout in seconds (default 30, max 120)"},
+                "confirmed": {"type": "boolean", "description": "Required for mutating queries (INSERT/UPDATE/DELETE/DDL)"},
+            },
+            "required": ["host", "user", "database", "query"],
+        },
+    ),
 ]
 
 _DISPATCH_LOCK = threading.Lock()
@@ -350,6 +373,7 @@ _DISPATCH = {
     "search_web": search_web,
     "search_ai": search_ai,
     "server_health": get_server_health,
+    "db_query": db_query,
 }
 
 

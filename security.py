@@ -220,3 +220,89 @@ def validate_host_port(host: str, port: int) -> None:
         raise ValueError("Hostname too long")
     if port not in ALLOWED_PORTS:
         raise PermissionError(f"Port {port} not in allowlist: {sorted(ALLOWED_PORTS)}")
+
+
+# ---------------------------------------------------------------------------
+# DB query validation — whitelist model for SQL
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+_DB_COMMENT_PATTERNS = [
+    _re.compile(r'/\*.*?\*/', _re.DOTALL),
+    _re.compile(r'--[^\n]*'),
+    _re.compile(r'#[^\n]*'),
+]
+
+_DB_READ_PREFIXES = frozenset({
+    "select", "show", "describe", "desc", "explain", "with",
+})
+
+_DB_WRITE_PREFIXES = frozenset({
+    "insert", "update", "delete", "replace", "call", "do",
+    "prepare", "execute",
+})
+
+_DB_DDL_PREFIXES = frozenset({
+    "create", "drop", "alter", "truncate", "rename",
+})
+
+_DB_PRIV_PREFIXES = frozenset({
+    "grant", "revoke",
+})
+
+_DB_PRIV_PATTERNS = _re.compile(
+    r'\b(CREATE\s+USER|DROP\s+USER|ALTER\s+USER|'
+    r'CREATE\s+ROLE|DROP\s+ROLE)\b', _re.IGNORECASE
+)
+
+_DB_DANGER_PATTERNS = _re.compile(
+    r'\b(INTO\s+(OUT|DUMP)FILE|LOAD_FILE|lo_import|lo_export|'
+    r'pg_read_file|pg_write_file|COPY\b)', _re.IGNORECASE
+)
+
+
+def _strip_sql_comments(query: str) -> str:
+    result = query
+    for pat in _DB_COMMENT_PATTERNS:
+        result = pat.sub(' ', result)
+    return result.strip()
+
+
+def validate_db_query(query: str, confirmed: bool) -> None:
+    cleaned = _strip_sql_comments(query)
+    if not cleaned:
+        raise ValueError("Empty query after stripping comments")
+
+    stripped = cleaned.rstrip(';').strip()
+    if ';' in stripped:
+        raise ValueError("Multi-statement queries are not allowed")
+
+    if _DB_PRIV_PATTERNS.search(cleaned):
+        raise PermissionError("User/role management is not allowed through this tool")
+
+    if _DB_PRIV_PREFIXES & {cleaned.split()[0].lower()}:
+        raise PermissionError("GRANT/REVOKE is not allowed through this tool")
+
+    first = cleaned.split()[0].lower()
+
+    if first in _DB_READ_PREFIXES:
+        if _DB_DANGER_PATTERNS.search(cleaned):
+            raise PermissionError(
+                f"Dangerous construct in SELECT query: {cleaned[:80]}"
+            )
+        return
+
+    if first in _DB_WRITE_PREFIXES | _DB_DDL_PREFIXES:
+        if not confirmed:
+            raise ValueError(
+                f"Query '{first.upper()}' requires confirmation. "
+                "Repeat with confirmed=true after user approval."
+            )
+        return
+
+    if not confirmed:
+        raise ValueError(
+            f"Unknown query type '{first.upper()}'. "
+            "Repeat with confirmed=true after user approval."
+        )
