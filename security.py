@@ -33,19 +33,22 @@ ALLOWED_PORTS = frozenset([443, 80, 8443, 8080, 465, 993, 995])
 # Commands that can mutate state via flags (sed -i, curl -X POST, wget --post-data,
 # find -exec, awk system()) are intentionally excluded and handled separately below.
 _SAFE_SINGLE = frozenset({
-    # System info
-    "uptime", "df", "free", "ps", "top", "htop", "vmstat", "iostat",
+    # System info. top/htop excluded: without -b they never exit and hang until timeout.
+    "uptime", "df", "free", "ps", "vmstat", "iostat",
     "netstat", "lsof", "who", "w", "last", "lastb",
-    # File reading (no mutating flags possible for these)
-    "cat", "head", "tail", "less", "more", "wc", "sort", "uniq", "cut",
+    # File reading. less/more excluded for the same reason as top: they are pagers.
+    "cat", "head", "tail", "wc", "sort", "uniq", "cut",
     "grep", "egrep", "fgrep",
     # Filesystem inspection (read-only, no -exec/-delete)
     "ls", "ll", "stat", "file", "du", "lsblk", "tree",
-    # Kernel / system logs
-    "journalctl", "dmesg",
-    # Network diagnostics (read-only: ping, traceroute, dns)
+    # Kernel / system logs. journalctl moved to conditionally safe: --rotate and
+    # --vacuum-* delete logs, which is exactly what an intruder does to cover tracks.
+    "dmesg",
+    # Network diagnostics (read-only: ping, traceroute, dns).
+    # 'ip' moved to conditionally safe: 'ip link set eth0 down' or 'ip route del'
+    # cuts the connection to the very server we are working on.
     "ping", "traceroute", "tracepath", "nslookup", "dig", "host",
-    "ss", "ip", "ifconfig",
+    "ss", "ifconfig",
     # Identity / environment
     "whoami", "id", "hostname", "uname", "date", "cal",
     "printenv", "which", "whereis", "type",
@@ -64,6 +67,11 @@ _MUTATING_TOKENS: dict[str, tuple[str, ...]] = {
     "wget": ("--post-data", "--post-file", "-o ", "--output-document",
              "--ftp-user", "--execute"),
     "find": ("-exec ", "-execdir ", "-delete", "-ok ", "-okdir "),
+    # Reading is fine (ip a, ip route show); changing addresses, routes or link
+    # state on a remote box is how you lock yourself out.
+    "ip": ("set ", "del ", "add ", "flush", "change ", "replace ", "append "),
+    # Reading journals is fine; these flags delete them.
+    "journalctl": ("--rotate", "--vacuum", "--flush", "--sync", "--relinquish-var"),
 }
 
 # Commands allowed only when no mutating token is present.
@@ -79,7 +87,18 @@ _SAFE_TWO_WORD = frozenset({
     # docker — read-only subcommands
     "docker ps", "docker images", "docker logs", "docker inspect",
     "docker stats", "docker top", "docker port", "docker diff",
-    "docker version", "docker info", "docker network",
+    "docker version", "docker info",
+    # NOTE: bare "docker network" is deliberately absent — it would also cover
+    # 'docker network rm' and 'docker network prune'. See _SAFE_THREE_WORD.
+})
+
+# Three-word prefixes, for subcommands whose parent is too broad to allow wholesale.
+_SAFE_THREE_WORD = frozenset({
+    "docker network ls", "docker network inspect",
+    "docker volume ls", "docker volume inspect",
+    "docker image ls", "docker image inspect",
+    "docker container ls", "docker container inspect",
+    "docker compose ps", "docker compose config",
 })
 
 # Always-blocked patterns regardless of confirmed (command injection / redirects).
@@ -162,7 +181,13 @@ def _is_subcommand_safe(cmd: str) -> bool:
         return True
     first = tokens[0].lower()
 
-    # Check two-word prefix first (more specific match for systemctl/docker)
+    # Longest prefix wins: three words before two, so that 'docker network ls'
+    # can be allowed while 'docker network rm' still falls through to confirmation.
+    if len(tokens) >= 3:
+        three = f"{first} {tokens[1].lower()} {tokens[2].lower()}"
+        if three in _SAFE_THREE_WORD:
+            return True
+
     if len(tokens) >= 2:
         two = f"{first} {tokens[1].lower()}"
         if two in _SAFE_TWO_WORD:
@@ -181,23 +206,98 @@ def _is_subcommand_safe(cmd: str) -> bool:
     return False
 
 
+def _mask_quotes(command: str) -> tuple[str, bool]:
+    """Mask quoted data so shell syntax can be told apart from payload.
+
+    Returns (mask, has_substitution).
+
+    In the mask every character inside quotes is replaced by 'x' and the quote
+    characters themselves by a space, so indexes still line up with the original
+    string. That lets us search for operators and redirects in the mask while
+    slicing the real command by the same positions.
+
+    has_substitution is True only when $( or a backtick appears where the shell
+    would actually expand it: outside quotes or inside double quotes. Inside
+    single quotes the shell expands nothing, so config text with ; $ ` > is safe.
+    """
+    out: list[str] = []
+    has_substitution = False
+    state: str | None = None  # None | "'" | '"'
+    i = 0
+    n = len(command)
+    while i < n:
+        c = command[i]
+
+        if state is None and c == "\\" and i + 1 < n:
+            out.append(' ')
+            out.append('x')
+            i += 2
+            continue
+
+        if state is None:
+            if c in ("'", '"'):
+                state = c
+                out.append(' ')
+            else:
+                if c == '`' or (c in '$<>' and i + 1 < n and command[i + 1] == '('):
+                    has_substitution = True
+                out.append(c)
+        elif state == "'":
+            if c == "'":
+                state = None
+                out.append(' ')
+            else:
+                out.append('x')
+        else:  # inside double quotes
+            if c == '"':
+                state = None
+                out.append(' ')
+            else:
+                if c == '`' or (c in '$<>' and i + 1 < n and command[i + 1] == '('):
+                    has_substitution = True
+                out.append('x')
+        i += 1
+
+    return ''.join(out), has_substitution
+
+
+# Command separators. Order matters: || and && must match before the single-char
+# class, otherwise '&&' would be split as two '&'. A bare '&' backgrounds the left
+# side and runs the rest, and a newline separates commands just like ';' — both
+# were missing and let 'uptime\nrm -rf /tmp/x' through with only 'uptime' inspected.
+_OPERATOR_RE = re.compile(r'\|\||&&|[|;&\n\r]')
+
+
 def _split_shell_commands(command: str) -> list[str]:
-    """Split a shell command string into individual commands by shell operators."""
-    # Split on ||, |, &&, ; — order matters: || before |
-    return re.split(r'\|\||&&|[|;]', command)
+    """Split a command into sub-commands by shell operators, ignoring quoted text.
+
+    Operators are located in the masked copy, so a semicolon inside an nginx
+    config snippet or a pipe inside a grep pattern no longer splits anything.
+    """
+    mask, _ = _mask_quotes(command)
+    parts: list[str] = []
+    start = 0
+    for m in _OPERATOR_RE.finditer(mask):
+        parts.append(command[start:m.start()])
+        start = m.end()
+    parts.append(command[start:])
+    return parts
 
 
 def validate_ssh_command(command: str, confirmed: bool) -> None:
     if len(command) > 500:
         raise ValueError("Command exceeds maximum length of 500 characters")
 
-    # Always block command injection patterns
-    for pattern in _INJECTION_PATTERNS:
-        if pattern in command:
-            raise ValueError(f"Shell injection pattern detected: {pattern!r}")
+    mask, has_substitution = _mask_quotes(command)
 
-    # Always block output redirection
-    if re.search(r'>{1,2}\s*\S', command):
+    # Block command substitution only where the shell would expand it.
+    # Inside single quotes $( and ` are literal text, so config snippets pass.
+    if has_substitution:
+        raise ValueError("Shell injection pattern detected: command substitution")
+
+    # Block output redirection, but only outside quotes: '<b>' in an alert body
+    # or a ';' in an nginx directive are data, not syntax.
+    if re.search(r'>{1,2}\s*\S', mask):
         raise ValueError("Output redirection is not allowed")
 
     # Read-only allowlist check: every sub-command must be safe or confirmed required
