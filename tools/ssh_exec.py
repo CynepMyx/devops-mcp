@@ -1,30 +1,17 @@
 import asyncio
 import logging
 import os
-import socket
 import time
 
 import paramiko
 
 from security import validate_ssh_key_path, validate_ssh_command
+from tools import ssh_pool
 
 KNOWN_HOSTS_PATH = os.environ.get("SSH_KNOWN_HOSTS", "/app/ssh/known_hosts")
 ALLOW_SSH_PASSWORD = os.environ.get("ALLOW_SSH_PASSWORD", "false").lower() == "true"
 
 logger = logging.getLogger(__name__)
-
-
-class _CapturingWarningPolicy(paramiko.MissingHostKeyPolicy):
-    """Like WarningPolicy but captures the warning for the response instead of logging it."""
-
-    def __init__(self):
-        self.warnings = []
-
-    def missing_host_key(self, client, hostname, key):
-        self.warnings.append(
-            f"Unknown host key for {hostname} ({key.get_name()}). "
-            "Add it to /app/ssh/known_hosts for strict verification."
-        )
 
 
 def _run_ssh(
@@ -37,52 +24,27 @@ def _run_ssh(
     verify_host_key: bool = False,
 ) -> dict:
     start = time.monotonic()
-    client = paramiko.SSHClient()
 
-    known_hosts_loaded = False
-    if os.path.isfile(KNOWN_HOSTS_PATH):
-        client.load_host_keys(KNOWN_HOSTS_PATH)
-        known_hosts_loaded = True
-
-    if verify_host_key:
-        client.set_missing_host_key_policy(paramiko.RejectPolicy())
-        host_key_mode = "strict"
-        warning_policy = None
-    else:
-        warning_policy = _CapturingWarningPolicy()
-        client.set_missing_host_key_policy(warning_policy)
-        host_key_mode = "warn"
-
-    try:
-        sock = socket.create_connection((host, 22), timeout=timeout)
-        sock.settimeout(timeout)
-        connect_kwargs = dict(
-            hostname=host,
-            sock=sock,
-            username=user,
-            timeout=timeout,
-            auth_timeout=timeout,
-            banner_timeout=timeout,
-            look_for_keys=False,
-            allow_agent=False,
+    # A pooled connection can die between calls: the server rebooted, a firewall
+    # dropped it, sshd was restarted. That shows up here, not at acquire time,
+    # so one retry on a fresh connection is part of normal operation.
+    for attempt in (1, 2):
+        entry, reused = ssh_pool.acquire(
+            host, user, key_path, password or "", timeout=timeout,
+            verify_host_key=verify_host_key,
         )
-        if password:
-            connect_kwargs["password"] = password
-        else:
-            connect_kwargs["key_filename"] = key_path
         try:
-            client.connect(**connect_kwargs)
-        except paramiko.AuthenticationException:
-            raise paramiko.AuthenticationException("Authentication failed")
-        finally:
-            # Clear password from local scope so it never appears in tracebacks
-            connect_kwargs.pop("password", None)
-        stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
-        out = stdout.read().decode(errors="replace")
-        err = stderr.read().decode(errors="replace")
-        exit_code = stdout.channel.recv_exit_status()
-    finally:
-        client.close()
+            with entry.lock:
+                stdin, stdout, stderr = entry.client.exec_command(command, timeout=timeout)
+                out = stdout.read().decode(errors="replace")
+                err = stderr.read().decode(errors="replace")
+                exit_code = stdout.channel.recv_exit_status()
+                ssh_pool.touch(entry)
+            break
+        except (paramiko.SSHException, EOFError, OSError):
+            ssh_pool.drop(entry)
+            if attempt == 2 or not reused:
+                raise
 
     duration_ms = round((time.monotonic() - start) * 1000)
     result = {
@@ -92,13 +54,9 @@ def _run_ssh(
         "stderr": err,
         "exit_code": exit_code,
         "duration_ms": duration_ms,
-        "host_key": {
-            "mode": host_key_mode,
-            "known_hosts_loaded": known_hosts_loaded,
-        },
+        "connection": "reused" if reused else "new",
+        "host_key": entry.host_key,
     }
-    if warning_policy and warning_policy.warnings:
-        result["host_key"]["warnings"] = warning_policy.warnings
     return result
 
 

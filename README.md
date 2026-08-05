@@ -23,6 +23,7 @@ Deploy it once on your server. Connect any MCP-compatible client.
 | `file_get` | Read a remote file over SFTP — no shell, no quoting problems |
 | `file_put` | Write a remote file over SFTP: diff preview, backup, preserved mode, config test with automatic rollback |
 | `db_query` | Run SQL against PostgreSQL or MySQL; writes require confirmation |
+| `ssh_sessions` | Inspect or close the SSH connections kept open between calls |
 | `log_tail` | Read system log files (syslog, nginx, auth, etc.) |
 | `nginx_test` | Run nginx -t config validation |
 | `systemd_status` | Check status of systemd services |
@@ -153,6 +154,32 @@ Then pass  in . Hosts not in  will be rejected.
 
 ---
 
+## Connections Stay Open
+
+`ssh_exec`, `file_get` and `file_put` share one live SSH connection per host and
+credential instead of authenticating on every call. Measured against a real host, the
+first call takes 220 ms and the ones after it 50 ms, and a twenty step diagnostic opens
+one connection instead of twenty. That second part matters as much as the speed: a burst
+of connections from one address is exactly what fail2ban is built to notice.
+
+Commands still run as separate channels, so nothing carries over between them: no working
+directory, no environment, no shell state. That is on purpose. A persistent *shell* would
+let two separately validated calls add up to one command that neither of them was.
+
+Connections close themselves after five minutes idle, and `ssh_sessions` shows what is
+open or closes it now:
+
+```
+ssh_sessions(action="status")
+ssh_sessions(action="close", host="10.0.0.5")
+```
+
+Credentials never share a connection: the pool key includes host, port, username and
+which key or password was used, and a password is stored only as a hash. Set
+`SSH_POOL=false` to go back to connecting every time.
+
+---
+
 ## Editing Remote Files
 
 `ssh_exec` runs everything through a shell, so writing a config with it means fighting
@@ -236,6 +263,10 @@ Docker SDK  Paramiko  psutil/dbus  httpx      Prometheus
 | `EXA_API_KEY` | — | Exa key for `search_ai` |
 | `PROMETHEUS_URL` | `http://host.docker.internal:9090` | Prometheus endpoint |
 | `ALLOW_SSH_PASSWORD` | `false` | Enable SSH password auth (key-based is default) |
+| `SSH_POOL` | `true` | Keep SSH connections open between calls; `false` reconnects every time |
+| `SSH_POOL_IDLE_TTL` | `300` | Close a pooled connection after this many idle seconds |
+| `SSH_POOL_MAX` | `20` | Maximum pooled connections before the least recently used one is dropped |
+| `SSH_POOL_KEEPALIVE` | `30` | Keepalive interval, so an idle connection is not dropped silently |
 | `DEV_HOT_RELOAD` | `false` | Enable live tool file-watching (dev only) |
 
 ---

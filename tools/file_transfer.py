@@ -15,7 +15,6 @@ import hashlib
 import logging
 import os
 import posixpath
-import socket
 import stat as stat_mod
 import time
 from datetime import datetime, timezone
@@ -28,8 +27,8 @@ from security import (
     validate_ssh_key_path,
     validate_verify_command,
 )
+from tools import ssh_pool
 
-KNOWN_HOSTS_PATH = os.environ.get("SSH_KNOWN_HOSTS", "/app/ssh/known_hosts")
 ALLOW_SSH_PASSWORD = os.environ.get("ALLOW_SSH_PASSWORD", "false").lower() == "true"
 
 MAX_DIFF_LINES = 200
@@ -37,54 +36,34 @@ MAX_DIFF_LINES = 200
 logger = logging.getLogger(__name__)
 
 
-class _CapturingWarningPolicy(paramiko.MissingHostKeyPolicy):
-    """Like WarningPolicy, but the warning reaches the caller instead of a log file."""
+def _pooled(host, user, key_path, password, timeout, verify_host_key, work):
+    """Run `work(client, sftp)` on a pooled connection, opening SFTP for it.
 
-    def __init__(self):
-        self.warnings = []
-
-    def missing_host_key(self, client, hostname, key):
-        self.warnings.append(
-            f"Unknown host key for {hostname} ({key.get_name()}). "
-            "Add it to /app/ssh/known_hosts for strict verification."
+    Only connection-level failures are retried. An SFTP error about a missing
+    file or denied permission is an answer, not a broken link, and must reach
+    the caller unchanged.
+    """
+    for attempt in (1, 2):
+        entry, reused = ssh_pool.acquire(
+            host, user, key_path, password or "", timeout=timeout,
+            verify_host_key=verify_host_key,
         )
+        try:
+            with entry.lock:
+                sftp = entry.client.open_sftp()
+                try:
+                    result = work(entry.client, sftp)
+                finally:
+                    sftp.close()
+                ssh_pool.touch(entry)
+        except (paramiko.SSHException, EOFError, ConnectionError):
+            ssh_pool.drop(entry)
+            if attempt == 2 or not reused:
+                raise
+            continue
 
-
-def _connect(host: str, user: str, key_path: str, password: str, timeout: int,
-             verify_host_key: bool) -> tuple[paramiko.SSHClient, dict]:
-    client = paramiko.SSHClient()
-    known_hosts_loaded = False
-    if os.path.isfile(KNOWN_HOSTS_PATH):
-        client.load_host_keys(KNOWN_HOSTS_PATH)
-        known_hosts_loaded = True
-
-    if verify_host_key:
-        client.set_missing_host_key_policy(paramiko.RejectPolicy())
-        policy = None
-        host_key = {"mode": "strict", "known_hosts_loaded": known_hosts_loaded}
-    else:
-        policy = _CapturingWarningPolicy()
-        client.set_missing_host_key_policy(policy)
-        host_key = {"mode": "warn", "known_hosts_loaded": known_hosts_loaded}
-
-    sock = socket.create_connection((host, 22), timeout=timeout)
-    sock.settimeout(timeout)
-    connect_kwargs = dict(
-        hostname=host, sock=sock, username=user, timeout=timeout,
-        auth_timeout=timeout, banner_timeout=timeout,
-        look_for_keys=False, allow_agent=False,
-    )
-    if password:
-        connect_kwargs["password"] = password
-    else:
-        connect_kwargs["key_filename"] = key_path
-    try:
-        client.connect(**connect_kwargs)
-    finally:
-        connect_kwargs.pop("password", None)
-    if policy and policy.warnings:
-        host_key["warnings"] = policy.warnings
-    return client, host_key
+        meta = {"host_key": entry.host_key, "connection": "reused" if reused else "new"}
+        return result, meta
 
 
 def _common_args(args: dict) -> tuple:
@@ -141,22 +120,22 @@ def _decode(data: bytes) -> tuple[str | None, str | None]:
 
 def _get_sync(host, user, key_path, password, timeout, verify_host_key,
               path, max_bytes) -> dict:
-    client, host_key = _connect(host, user, key_path, password, timeout, verify_host_key)
-    try:
-        sftp = client.open_sftp()
-        try:
-            st = sftp.stat(path)
-            if stat_mod.S_ISDIR(st.st_mode):
-                return {"error": f"Not a regular file: {path}", "outcome": "refused"}
-            data, truncated = _read_remote(sftp, path, max_bytes)
-        finally:
-            sftp.close()
-    finally:
-        client.close()
+    def work(client, sftp):
+        st = sftp.stat(path)
+        if stat_mod.S_ISDIR(st.st_mode):
+            return {"error": f"Not a regular file: {path}", "outcome": "refused"}
+        data, truncated = _read_remote(sftp, path, max_bytes)
+        return st, data, truncated
+
+    outcome, meta = _pooled(host, user, key_path, password, timeout,
+                            verify_host_key, work)
+    if isinstance(outcome, dict):
+        return {**outcome, **meta}
+    st, data, truncated = outcome
 
     result = {"host": host, "path": path, **_describe(st),
               "sha256": hashlib.sha256(data).hexdigest(),
-              "truncated": truncated, "host_key": host_key}
+              "truncated": truncated, **meta}
     text, why_not = _decode(data)
     if text is None:
         result["content"] = None
@@ -222,133 +201,131 @@ def _write_atomic(sftp, path: str, payload: bytes, target_mode: int,
 def _put_sync(host, user, key_path, password, timeout, verify_host_key,
               path, payload: bytes, mode, backup, dry_run,
               verify_cmd=None, rollback=True) -> dict:
-    client, host_key = _connect(host, user, key_path, password, timeout, verify_host_key)
     warnings: list[str] = []
-    try:
-        sftp = client.open_sftp()
+
+    def work(client, sftp):
         try:
-            try:
-                st = sftp.stat(path)
-                exists = True
-            except IOError as exc:
-                if not isinstance(exc, FileNotFoundError) and getattr(exc, "errno", None) not in (
-                        None, errno.ENOENT):
-                    raise
-                st = None
-                exists = False
+            st = sftp.stat(path)
+            exists = True
+        except IOError as exc:
+            if not isinstance(exc, FileNotFoundError) and getattr(exc, "errno", None) not in (
+                    None, errno.ENOENT):
+                raise
+            st = None
+            exists = False
 
-            if exists and stat_mod.S_ISDIR(st.st_mode):
-                return {"error": f"Path is a directory: {path}", "outcome": "refused"}
+        if exists and stat_mod.S_ISDIR(st.st_mode):
+            return {"error": f"Path is a directory: {path}", "outcome": "refused"}
 
-            # A new file has no mode to inherit, and 644 is a guess that leaks
-            # configs to every user on the box. Make the caller state it.
-            target_mode = mode if mode is not None else (
-                stat_mod.S_IMODE(st.st_mode) if exists else None)
-            if target_mode is None:
+        # A new file has no mode to inherit, and 644 is a guess that leaks
+        # configs to every user on the box. Make the caller state it.
+        target_mode = mode if mode is not None else (
+            stat_mod.S_IMODE(st.st_mode) if exists else None)
+        if target_mode is None:
+            return {
+                "error": (f"{path} does not exist yet; pass mode explicitly, "
+                          "e.g. mode='0644'"),
+                "outcome": "refused",
+            }
+
+        old_bytes = b""
+        if exists:
+            old_bytes, truncated = _read_remote(sftp, path, MAX_FILE_BYTES)
+            if truncated:
                 return {
-                    "error": (f"{path} does not exist yet; pass mode explicitly, "
-                              "e.g. mode='0644'"),
+                    "error": (f"Existing file is larger than {MAX_FILE_BYTES} bytes; "
+                              "refusing to replace it blindly"),
                     "outcome": "refused",
                 }
 
-            old_bytes = b""
-            if exists:
-                old_bytes, truncated = _read_remote(sftp, path, MAX_FILE_BYTES)
-                if truncated:
-                    return {
-                        "error": (f"Existing file is larger than {MAX_FILE_BYTES} bytes; "
-                                  "refusing to replace it blindly"),
-                        "outcome": "refused",
-                    }
+        old_text, _ = _decode(old_bytes)
+        new_text, _ = _decode(payload)
+        diff_lines: list[str] = []
+        if old_text is not None and new_text is not None:
+            diff_lines = list(difflib.unified_diff(
+                old_text.splitlines(), new_text.splitlines(),
+                fromfile=f"{path} (current)", tofile=f"{path} (new)",
+                lineterm="", n=3,
+            ))
+        diff_truncated = len(diff_lines) > MAX_DIFF_LINES
+        diff = "\n".join(diff_lines[:MAX_DIFF_LINES])
 
-            old_text, _ = _decode(old_bytes)
-            new_text, _ = _decode(payload)
-            diff_lines: list[str] = []
-            if old_text is not None and new_text is not None:
-                diff_lines = list(difflib.unified_diff(
-                    old_text.splitlines(), new_text.splitlines(),
-                    fromfile=f"{path} (current)", tofile=f"{path} (new)",
-                    lineterm="", n=3,
-                ))
-            diff_truncated = len(diff_lines) > MAX_DIFF_LINES
-            diff = "\n".join(diff_lines[:MAX_DIFF_LINES])
+        summary = {
+            "host": host,
+            "path": path,
+            "exists": exists,
+            "old_sha256": hashlib.sha256(old_bytes).hexdigest() if exists else None,
+            "new_sha256": hashlib.sha256(payload).hexdigest(),
+            "new_size": len(payload),
+            "diff": diff,
+            "diff_truncated": diff_truncated,
+        }
+        if exists:
+            summary["current"] = _describe(st)
 
-            summary = {
-                "host": host,
-                "path": path,
-                "host_key": host_key,
-                "exists": exists,
-                "old_sha256": hashlib.sha256(old_bytes).hexdigest() if exists else None,
-                "new_sha256": hashlib.sha256(payload).hexdigest(),
-                "new_size": len(payload),
-                "diff": diff,
-                "diff_truncated": diff_truncated,
-            }
-            if exists:
-                summary["current"] = _describe(st)
+        if not diff_lines and exists and old_bytes == payload:
+            summary["written"] = False
+            summary["note"] = "Content identical, nothing to write"
+            return summary
 
-            if not diff_lines and exists and old_bytes == payload:
-                summary["written"] = False
-                summary["note"] = "Content identical, nothing to write"
-                return summary
-
-            if dry_run:
-                summary["written"] = False
-                summary["dry_run"] = True
-                if verify_cmd:
-                    summary["verify_planned"] = verify_cmd
-                return summary
-
-            backup_path = None
-            if exists and backup:
-                backup_path = _backup_name(sftp, path)
-                with sftp.open(backup_path, "wb") as fh:
-                    fh.write(old_bytes)
-                sftp.chmod(backup_path, stat_mod.S_IMODE(st.st_mode))
-
-            owner = (st.st_uid, st.st_gid) if exists else None
-            _write_atomic(sftp, path, payload, target_mode, owner, exists, warnings)
-            written = sftp.stat(path)
-
-            # Checking the config we just wrote, and putting the old one back when
-            # the check fails, is the whole point: a bad config on a client server
-            # is only harmless for as long as nothing reloads it.
+        if dry_run:
+            summary["written"] = False
+            summary["dry_run"] = True
             if verify_cmd:
-                verify = _exec(client, verify_cmd, timeout)
-                summary["verify"] = verify
-                if verify["exit_code"] != 0:
-                    summary["verify_failed"] = True
-                    if rollback:
-                        if exists:
-                            _write_atomic(sftp, path, old_bytes, target_mode,
-                                          owner, True, warnings)
-                            written = sftp.stat(path)
-                        else:
-                            sftp.remove(path)
-                            written = None
-                        summary["rolled_back"] = True
-                        summary["verify_after_rollback"] = _exec(client, verify_cmd, timeout)
-                        if backup_path:
-                            # Nothing changed in the end, so the copy is just litter.
-                            try:
-                                sftp.remove(backup_path)
-                                backup_path = None
-                            except (IOError, OSError):
-                                warnings.append(f"Could not remove backup {backup_path}")
-                    else:
-                        summary["rolled_back"] = False
-                        warnings.append(
-                            "Verification failed and rollback_on_failure=false: "
-                            "the new content is still in place."
-                        )
-        finally:
-            sftp.close()
-    finally:
-        client.close()
+                summary["verify_planned"] = verify_cmd
+            return summary
 
-    summary["written"] = not summary.get("rolled_back", False)
-    summary["backup"] = backup_path
-    summary["result"] = _describe(written) if written else None
+        backup_path = None
+        if exists and backup:
+            backup_path = _backup_name(sftp, path)
+            with sftp.open(backup_path, "wb") as fh:
+                fh.write(old_bytes)
+            sftp.chmod(backup_path, stat_mod.S_IMODE(st.st_mode))
+
+        owner = (st.st_uid, st.st_gid) if exists else None
+        _write_atomic(sftp, path, payload, target_mode, owner, exists, warnings)
+        written = sftp.stat(path)
+
+        # Checking the config we just wrote, and putting the old one back when
+        # the check fails, is the whole point: a bad config on a client server
+        # is only harmless for as long as nothing reloads it.
+        if verify_cmd:
+            verify = _exec(client, verify_cmd, timeout)
+            summary["verify"] = verify
+            if verify["exit_code"] != 0:
+                summary["verify_failed"] = True
+                if rollback:
+                    if exists:
+                        _write_atomic(sftp, path, old_bytes, target_mode,
+                                      owner, True, warnings)
+                        written = sftp.stat(path)
+                    else:
+                        sftp.remove(path)
+                        written = None
+                    summary["rolled_back"] = True
+                    summary["verify_after_rollback"] = _exec(client, verify_cmd, timeout)
+                    if backup_path:
+                        # Nothing changed in the end, so the copy is just litter.
+                        try:
+                            sftp.remove(backup_path)
+                            backup_path = None
+                        except (IOError, OSError):
+                            warnings.append(f"Could not remove backup {backup_path}")
+                else:
+                    summary["rolled_back"] = False
+                    warnings.append(
+                        "Verification failed and rollback_on_failure=false: "
+                        "the new content is still in place."
+                    )
+
+        summary["written"] = not summary.get("rolled_back", False)
+        summary["backup"] = backup_path
+        summary["result"] = _describe(written) if written else None
+        return summary
+
+    summary, meta = _pooled(host, user, key_path, password, timeout,
+                            verify_host_key, work)
+    summary.update(meta)
     if warnings:
         summary["warnings"] = warnings
     return summary

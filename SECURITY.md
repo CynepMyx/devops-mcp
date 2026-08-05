@@ -22,6 +22,7 @@ can enforce that prompt by protocol instead of by convention.
 - **Remote file access** — `file_get` and `file_put` refuse `shadow`, `gshadow`, `sudoers`, `authorized_keys` and private keys outright; `file_put` needs `confirmed=true`, keeps mode and owner, and writes through a temporary file in the same directory
 - **Verified writes** — `file_put`'s optional `verify_cmd` restores the previous content when the check fails. Because that command runs automatically as part of a write, it is limited to config tests (`nginx -t` and the like) with no operators, redirects or substitutions; general execution stays in `ssh_exec`, where it appears as its own tool call the user can see and refuse
 - **Audit trail** — every tool call logged to `/audit/audit.jsonl` with an outcome of `ok`, `refused` or `error`; write failures emit a warning instead of being silently swallowed. File bodies and other long values are stored as `<N chars, sha256=...>`, so the log proves what was written without becoming a copy of it
+- **Pooled connections are per credential** — a kept-open SSH connection is keyed by host, port, username and which key or password opened it, so one host's session is never handed to a different credential; passwords are stored as a hash, sessions close after five minutes idle and on shutdown, and `ssh_sessions` closes them on demand
 - **SSH password auth disabled** — password authentication off by default (ALLOW_SSH_PASSWORD=false)
 
 **What it does NOT protect against:**

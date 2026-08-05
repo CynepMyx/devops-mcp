@@ -34,6 +34,8 @@ from tools.search_tools import search_web, search_ai
 from tools.server_health import get_server_health
 from tools.db_query import db_query
 from tools.file_transfer import file_get, file_put
+from tools.ssh_sessions import ssh_sessions
+from tools import ssh_pool
 
 AUDIT_LOG_PATH = os.environ.get("AUDIT_LOG_PATH", "/audit/audit.jsonl")
 MCP_HOST = os.environ.get("MCP_HOST", "127.0.0.1")
@@ -48,6 +50,9 @@ _TOOL_MODULES = [
     "tools.server_health",
     "tools.db_query",
     "tools.file_transfer",
+    "tools.ssh_sessions",
+    # tools.ssh_pool is deliberately absent: reloading it would drop the dict
+    # of live connections while the sockets stay open.
 ]
 
 
@@ -74,6 +79,7 @@ def _reload_tools() -> None:
     from tools.server_health import get_server_health
     from tools.db_query import db_query
     from tools.file_transfer import file_get, file_put
+    from tools.ssh_sessions import ssh_sessions
     with _DISPATCH_LOCK:
         _DISPATCH.update({
             "system_info": get_system_info, "docker_list": get_docker_list,
@@ -87,6 +93,7 @@ def _reload_tools() -> None:
             "server_health": get_server_health,
             "db_query": db_query,
             "file_get": file_get, "file_put": file_put,
+            "ssh_sessions": ssh_sessions,
         })
     print("[watcher] tools reloaded", flush=True)
 
@@ -126,8 +133,15 @@ def _start_watcher() -> None:
 @asynccontextmanager
 async def lifespan(_app):
     _start_watcher()
-    async with session_manager.run():
-        yield
+    try:
+        async with session_manager.run():
+            yield
+    finally:
+        # Leaving sessions open on a client server after we stop is rude and
+        # shows up in their auth log as a connection nobody closed.
+        closed = ssh_pool.close_all()
+        if closed:
+            print(f"[pool] closed {closed} ssh connections on shutdown", flush=True)
 
 
 app = FastAPI(title="DevOps MCP Server", docs_url=None, redoc_url=None, lifespan=lifespan)
@@ -457,6 +471,26 @@ _TOOLS = [
             "required": ["host", "user", "path", "content"],
         },
     ),
+    Tool(
+        annotations=_read_only("SSH sessions"),
+        name="ssh_sessions",
+        description=(
+            "Inspect or close the SSH connections kept open between calls. "
+            "ssh_exec, file_get and file_put reuse a live connection per host and "
+            "credential instead of authenticating again every time, which is faster "
+            "and stops a burst of tool calls from looking like an attack to fail2ban. "
+            "Connections close by themselves after being idle. action='status' lists "
+            "them; action='close' drops them now, optionally only for one host or user."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["status", "close"], "description": "status (default) or close"},
+                "host": {"type": "string", "description": "Only close connections to this host"},
+                "user": {"type": "string", "description": "Only close connections for this username"},
+            },
+        },
+    ),
 ]
 
 _DISPATCH_LOCK = threading.Lock()
@@ -481,6 +515,7 @@ _DISPATCH = {
     "db_query": db_query,
     "file_get": file_get,
     "file_put": file_put,
+    "ssh_sessions": ssh_sessions,
 }
 
 

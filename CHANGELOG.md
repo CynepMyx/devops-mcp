@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.0] - 2026-08-06
+
+### Added
+- SSH connections are kept open between tool calls. Every `ssh_exec` used to be a full connect, key exchange, auth and close; a twenty command diagnostic paid that twenty times, and twenty connections in a row from one address are what fail2ban is built to notice (it banned us for fifteen minutes mid-incident once). Measured against a real host: first call 220 ms, later calls 50 ms, one handshake instead of eight. `file_get` and `file_put` ride the same connection.
+- `ssh_sessions` tool: `action='status'` lists open connections with usage and idle time, `action='close'` drops them now, optionally for one host or user only.
+- Connections are keyed by host, port, username and credential, so two different keys or passwords never share one. A password is kept only as a short hash of itself.
+- Idle connections close after `SSH_POOL_IDLE_TTL` seconds (default 300) via a background reaper, on shutdown, and whenever the transport turns out to be dead. New settings: `SSH_POOL`, `SSH_POOL_IDLE_TTL`, `SSH_POOL_MAX`, `SSH_POOL_KEEPALIVE`.
+- Responses carry `connection: reused | new`, so the audit log shows which calls paid for a handshake.
+
+### Notes
+- Commands still run as separate channels: no working directory, environment or shell state carries between calls. A persistent shell would let two separately validated calls add up to one command neither of them was.
+- `tools/ssh_pool.py` is deliberately absent from the hot-reload list, since reloading it would drop the dict of live connections while the sockets stayed open.
+
 ## [0.4.0] - 2026-08-05
 
 ### Added
