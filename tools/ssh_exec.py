@@ -5,7 +5,7 @@ import time
 
 import paramiko
 
-from security import validate_ssh_key_path, validate_ssh_command
+from security import is_read_only_command, validate_ssh_key_path, validate_ssh_command
 from tools import ssh_pool
 
 KNOWN_HOSTS_PATH = os.environ.get("SSH_KNOWN_HOSTS", "/app/ssh/known_hosts")
@@ -27,7 +27,12 @@ def _run_ssh(
 
     # A pooled connection can die between calls: the server rebooted, a firewall
     # dropped it, sshd was restarted. That shows up here, not at acquire time,
-    # so one retry on a fresh connection is part of normal operation.
+    # so one retry on a fresh connection is part of normal operation — but only
+    # for a read. If the transport died after the server started running
+    # 'apt install', we cannot tell whether it finished, and running it again to
+    # find out is worse than reporting the truth.
+    retryable = is_read_only_command(command)
+
     for attempt in (1, 2):
         entry, reused = ssh_pool.acquire(
             host, user, key_path, password or "", timeout=timeout,
@@ -41,10 +46,16 @@ def _run_ssh(
                 exit_code = stdout.channel.recv_exit_status()
                 ssh_pool.touch(entry)
             break
-        except (paramiko.SSHException, EOFError, OSError):
+        except (paramiko.SSHException, EOFError, OSError) as exc:
             ssh_pool.drop(entry)
-            if attempt == 2 or not reused:
+            if not reused or attempt == 2:
                 raise
+            if not retryable:
+                raise paramiko.SSHException(
+                    f"Connection dropped while the command was running, so it may have "
+                    f"already taken effect on {host}. Not retrying it blindly; check the "
+                    f"server before running it again. ({exc})"
+                )
 
     duration_ms = round((time.monotonic() - start) * 1000)
     result = {

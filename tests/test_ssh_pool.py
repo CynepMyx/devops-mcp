@@ -137,6 +137,22 @@ def test_disabled_pool_hands_out_fresh_connections(clean_pool, monkeypatch):
     assert ssh_pool.status()["open"] == 0
 
 
+def test_reaper_leaves_a_busy_connection_alone(clean_pool, monkeypatch):
+    """last_used only moves when a command finishes, so a long one looks idle."""
+    entry, _ = ssh_pool.acquire("10.0.0.1", "root", "/app/keys/a.pem")
+    monkeypatch.setattr(ssh_pool, "IDLE_TTL", 60)
+    entry.last_used = time.monotonic() - 61
+
+    entry.lock.acquire()  # stands in for a command still running
+    try:
+        assert ssh_pool._reap() == 0
+        assert entry.client.closed is False
+    finally:
+        entry.lock.release()
+
+    assert ssh_pool._reap() == 1
+
+
 def test_status_reports_usage(clean_pool):
     ssh_pool.acquire("10.0.0.1", "root", "/app/keys/a.pem")
     ssh_pool.acquire("10.0.0.1", "root", "/app/keys/a.pem")

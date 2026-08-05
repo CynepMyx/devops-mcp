@@ -183,6 +183,24 @@ def _is_subcommand_safe(cmd: str) -> bool:
     return False
 
 
+def is_read_only_command(command: str) -> bool:
+    """True when every sub-command is in the read-only allowlist.
+
+    Used to decide whether a command may be retried after the connection died
+    mid-flight. Reading twice costs nothing; 'apt install' or 'sed -i' running
+    a second time because we could not tell whether the first one landed is a
+    different matter.
+    """
+    try:
+        _, has_substitution = _mask_quotes(command)
+        if has_substitution:
+            return False
+        return all(_is_subcommand_safe(sc) for sc in _split_shell_commands(command)
+                   if sc.strip())
+    except Exception:
+        return False
+
+
 def _mask_quotes(command: str) -> tuple[str, bool]:
     """Mask quoted data so shell syntax can be told apart from payload.
 

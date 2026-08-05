@@ -36,14 +36,25 @@ MAX_DIFF_LINES = 200
 logger = logging.getLogger(__name__)
 
 
-def _pooled(host, user, key_path, password, timeout, verify_host_key, work):
+class ConnectionLostMidWrite(Exception):
+    """The transport died after we had already started changing the file."""
+
+
+def _pooled(host, user, key_path, password, timeout, verify_host_key, work,
+            retry=True):
     """Run `work(client, sftp)` on a pooled connection, opening SFTP for it.
 
     Only connection-level failures are retried. An SFTP error about a missing
     file or denied permission is an answer, not a broken link, and must reach
     the caller unchanged.
+
+    retry=False is for work that is not safe to replay. file_put stats the file,
+    reads the old content, backs it up and renames the new one into place; if the
+    transport dies after the rename, a second pass would read the *new* content
+    as the old one, report "nothing to write", and treat the replacement as the
+    thing to restore.
     """
-    for attempt in (1, 2):
+    for attempt in (1, 2) if retry else (1,):
         entry, reused = ssh_pool.acquire(
             host, user, key_path, password or "", timeout=timeout,
             verify_host_key=verify_host_key,
@@ -58,7 +69,7 @@ def _pooled(host, user, key_path, password, timeout, verify_host_key, work):
                 ssh_pool.touch(entry)
         except (paramiko.SSHException, EOFError, ConnectionError):
             ssh_pool.drop(entry)
-            if attempt == 2 or not reused:
+            if not retry or attempt == 2 or not reused:
                 raise
             continue
 
@@ -202,6 +213,9 @@ def _put_sync(host, user, key_path, password, timeout, verify_host_key,
               path, payload: bytes, mode, backup, dry_run,
               verify_cmd=None, rollback=True) -> dict:
     warnings: list[str] = []
+    # Written from inside work(), read after a connection failure so the error
+    # can tell the user where the previous content is.
+    progress: dict = {"stage": "not started", "backup": None}
 
     def work(client, sftp):
         try:
@@ -281,9 +295,12 @@ def _put_sync(host, user, key_path, password, timeout, verify_host_key,
             with sftp.open(backup_path, "wb") as fh:
                 fh.write(old_bytes)
             sftp.chmod(backup_path, stat_mod.S_IMODE(st.st_mode))
+            progress["backup"] = backup_path
 
         owner = (st.st_uid, st.st_gid) if exists else None
+        progress["stage"] = "writing"
         _write_atomic(sftp, path, payload, target_mode, owner, exists, warnings)
+        progress["stage"] = "written"
         written = sftp.stat(path)
 
         # Checking the config we just wrote, and putting the old one back when
@@ -323,8 +340,22 @@ def _put_sync(host, user, key_path, password, timeout, verify_host_key,
         summary["result"] = _describe(written) if written else None
         return summary
 
-    summary, meta = _pooled(host, user, key_path, password, timeout,
-                            verify_host_key, work)
+    try:
+        summary, meta = _pooled(host, user, key_path, password, timeout,
+                                verify_host_key, work, retry=False)
+    except (paramiko.SSHException, EOFError, ConnectionError) as exc:
+        if progress["stage"] == "not started":
+            raise
+        where = ("The new content is already in place; verification did not finish"
+                 if progress["stage"] == "written"
+                 else "The write was interrupted and the file may be incomplete")
+        backup_note = (f" The previous content is in {progress['backup']}."
+                       if progress["backup"] else "")
+        raise ConnectionLostMidWrite(
+            f"Connection lost while writing {path}. {where}.{backup_note} "
+            f"Check the file before writing again. ({exc})"
+        ) from exc
+
     summary.update(meta)
     if warnings:
         summary["warnings"] = warnings
@@ -420,6 +451,8 @@ async def file_put(args: dict) -> dict:
         )
     except asyncio.TimeoutError:
         return {"error": f"SFTP timed out after {timeout}s"}
+    except ConnectionLostMidWrite as e:
+        return {"error": str(e)}
     except FileNotFoundError as e:
         return {"error": f"Directory does not exist: {e}"}
     except PermissionError as e:

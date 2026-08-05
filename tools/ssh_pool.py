@@ -127,10 +127,19 @@ def _reap(now: float | None = None) -> int:
     closed = 0
     with _POOL_LOCK:
         for key, entry in list(_POOL.items()):
-            if now - entry.last_used > IDLE_TTL or not entry.alive():
+            if now - entry.last_used <= IDLE_TTL and entry.alive():
+                continue
+            # last_used is only refreshed once a command finishes, so a long
+            # running one looks idle. Its lock is held for the whole execution:
+            # if we cannot take it, the connection is busy, not abandoned.
+            if not entry.lock.acquire(blocking=False):
+                continue
+            try:
                 _POOL.pop(key, None)
                 entry.close()
                 closed += 1
+            finally:
+                entry.lock.release()
     return closed
 
 

@@ -6,6 +6,7 @@ opened, which is exactly where the guarantees have to live.
 import asyncio
 import os
 import sys
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -141,6 +142,122 @@ def test_bad_verify_cmd_is_refused_before_connecting():
                            "verify_cmd": "rm -rf /", "confirmed": True}))
     assert result["outcome"] == "refused"
     assert "verify_cmd" in result["error"]
+
+
+# --- a dropped connection must not replay the write -----------------------
+
+class _FakeStat:
+    st_mode = 0o100640
+    st_uid = 1000
+    st_gid = 1000
+    st_size = 11
+    st_mtime = 1_700_000_000
+
+
+class _FakeFile:
+    def __init__(self, store, name):
+        self.store, self.name, self.buf = store, name, b""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        if self.buf:
+            self.store[self.name] = self.buf
+        return False
+
+    def write(self, data):
+        self.buf += data
+
+    def read(self, size=-1):
+        return self.store.get(self.name, b"")
+
+    def prefetch(self):
+        pass
+
+
+class _FakeSftp:
+    """Just enough SFTP to let file_put run against a dict."""
+
+    def __init__(self, store):
+        self.store = store
+
+    def stat(self, path):
+        if path not in self.store:
+            raise FileNotFoundError(path)
+        st = _FakeStat()
+        st.st_size = len(self.store[path])
+        return st
+
+    def open(self, path, mode="r"):
+        return _FakeFile(self.store, path)
+
+    def chmod(self, path, mode):
+        pass
+
+    def chown(self, path, uid, gid):
+        pass
+
+    def posix_rename(self, src, dst):
+        self.store[dst] = self.store.pop(src)
+
+    def remove(self, path):
+        self.store.pop(path, None)
+
+    def close(self):
+        pass
+
+
+class _FakeClient:
+    def __init__(self, store, counter):
+        self.store, self.counter = store, counter
+
+    def open_sftp(self):
+        self.counter["passes"] += 1
+        return _FakeSftp(self.store)
+
+
+class _FakeEntry:
+    def __init__(self, store, counter):
+        self.client = _FakeClient(store, counter)
+        self.host_key = {"mode": "warn"}
+        self.lock = threading.Lock()
+
+
+def test_a_dropped_connection_does_not_replay_the_write(monkeypatch):
+    """Regression: retrying file_put re-reads the file it just replaced.
+
+    The real _pooled retry path runs here on purpose. With a retry, the second
+    pass reads the new content as the old one, reports "Content identical" about
+    a config it had just replaced, and would treat the replacement as the thing
+    to restore.
+    """
+    import paramiko
+
+    from tools import file_transfer, ssh_pool
+
+    store = {"/etc/app/config.json": b'{"old": 1}'}
+    counter = {"passes": 0}
+
+    monkeypatch.setattr(ssh_pool, "acquire",
+                        lambda *a, **kw: (_FakeEntry(store, counter), True))
+    monkeypatch.setattr(ssh_pool, "drop", lambda entry: None)
+    monkeypatch.setattr(ssh_pool, "touch", lambda entry: None)
+
+    def dying_exec(client, command, timeout):
+        raise paramiko.SSHException("Server connection dropped")
+
+    monkeypatch.setattr(file_transfer, "_exec", dying_exec)
+
+    result = run(file_put({**HOST, "path": "/etc/app/config.json",
+                           "content": '{"new": 2}', "confirmed": True,
+                           "verify_cmd": "python3 -m json.tool /etc/app/config.json"}))
+
+    assert counter["passes"] == 1, "the write must not be attempted twice"
+    assert "Content identical" not in str(result), \
+        "the content we just wrote is not 'nothing to write'"
+    assert result.get("error"), "a connection lost mid-write has to be reported"
+    assert "already in place" in result["error"]
 
 
 def test_key_outside_the_keys_directory_is_refused():

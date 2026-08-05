@@ -11,6 +11,8 @@
 
 ### Notes
 - Commands still run as separate channels: no working directory, environment or shell state carries between calls. A persistent shell would let two separately validated calls add up to one command neither of them was.
+- A connection that dies mid-flight is retried once, but only for a read. `file_put` is never replayed: if the transport dropped after the rename, a second pass would read the new content as the old one, report "nothing to write" about a config it had just replaced, and treat the replacement as the thing to restore. It now returns an error naming the stage it stopped at and where the previous content is. `ssh_exec` retries only commands that pass the read-only allowlist, since a second `apt install` is worse than an honest error.
+- The pool only covers connections this server opens. A second hop inside the command (`ssh`, `sshpass`) is still a fresh connection every time, so the fail2ban argument does not extend to hosts reached that way.
 - `tools/ssh_pool.py` is deliberately absent from the hot-reload list, since reloading it would drop the dict of live connections while the sockets stayed open.
 
 ## [0.4.0] - 2026-08-05

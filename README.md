@@ -162,6 +162,11 @@ first call takes 220 ms and the ones after it 50 ms, and a twenty step diagnosti
 one connection instead of twenty. That second part matters as much as the speed: a burst
 of connections from one address is exactly what fail2ban is built to notice.
 
+The pool covers connections this server opens itself. If you reach a host through a
+second hop that the container does not control — an `ssh` or `sshpass` call inside the
+command, say — that hop is still a fresh connection every time, and the target sees the
+same burst it always did.
+
 Commands still run as separate channels, so nothing carries over between them: no working
 directory, no environment, no shell state. That is on purpose. A persistent *shell* would
 let two separately validated calls add up to one command that neither of them was.

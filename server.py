@@ -472,7 +472,9 @@ _TOOLS = [
         },
     ),
     Tool(
-        annotations=_read_only("SSH sessions"),
+        # Not read-only: action='close' tears down live sessions. Claiming
+        # otherwise would defeat the point of shipping annotations at all.
+        annotations=_mutating("SSH sessions", destructive=False),
         name="ssh_sessions",
         description=(
             "Inspect or close the SSH connections kept open between calls. "
