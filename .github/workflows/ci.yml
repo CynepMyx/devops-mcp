@@ -21,6 +21,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # Errors and undefined/duplicate names only. Style is not worth a red build,
+      # but a second def shadowing the first one (F811) shipped unnoticed for months.
+      - name: Lint
+        run: |
+          pip install ruff
+          ruff check --select E9,F .
+
       - name: Syntax check
         run: python3 scripts/check_syntax.py
 

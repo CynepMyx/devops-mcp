@@ -112,23 +112,26 @@ async def ssh_exec(args: dict) -> dict:
     confirmed = bool(args.get("confirmed", False))
     verify_host_key = bool(args.get("verify_host_key", False))
 
+    # "refused" marks a rejection by our own rules, so the audit log can tell it
+    # apart from a server that was unreachable or an authentication failure.
     if not host:
-        return {"error": "Parameter 'host' is required"}
+        return {"error": "Parameter 'host' is required", "outcome": "refused"}
     if not user:
-        return {"error": "Parameter 'user' is required"}
+        return {"error": "Parameter 'user' is required", "outcome": "refused"}
     if password and not ALLOW_SSH_PASSWORD:
-        return {"error": "Password authentication is disabled. Set ALLOW_SSH_PASSWORD=true to enable."}
+        return {"error": "Password authentication is disabled. Set ALLOW_SSH_PASSWORD=true to enable.",
+                "outcome": "refused"}
     if not key_path and not password:
-        return {"error": "Parameter 'key' or 'password' is required"}
+        return {"error": "Parameter 'key' or 'password' is required", "outcome": "refused"}
     if not command:
-        return {"error": "Parameter 'command' is required"}
+        return {"error": "Parameter 'command' is required", "outcome": "refused"}
 
     try:
         if key_path:
             validate_ssh_key_path(key_path)
         validate_ssh_command(command, confirmed)
     except (ValueError, PermissionError) as e:
-        return {"error": str(e)}
+        return {"error": str(e), "outcome": "refused"}
 
     try:
         return await asyncio.wait_for(

@@ -20,6 +20,9 @@ Deploy it once on your server. Connect any MCP-compatible client.
 | `docker_stats` | CPU/memory/network stats for running containers |
 | `docker_control` | Start, stop, or restart a container |
 | `ssh_exec` | Execute commands on remote hosts via SSH key |
+| `file_get` | Read a remote file over SFTP — no shell, no quoting problems |
+| `file_put` | Write a remote file over SFTP, with diff preview, backup and preserved mode |
+| `db_query` | Run SQL against PostgreSQL or MySQL; writes require confirmation |
 | `log_tail` | Read system log files (syslog, nginx, auth, etc.) |
 | `nginx_test` | Run nginx -t config validation |
 | `systemd_status` | Check status of systemd services |
@@ -40,10 +43,13 @@ Security is built in, not bolted on:
 - **Log path allowlist** — `log_tail` only reads from predefined safe paths
 - **Nginx container allowlist** — `nginx_test` only runs against approved container names
 - **docker_control requires confirmation** — `stop` and `restart` require `confirmed=true`; AI must ask user before proceeding
-- **Container runs as non-root** — `mcpuser` (UID 1000), read-only filesystem, all Linux capabilities dropped
+- **file_put requires confirmation** — writes need `confirmed=true`; `dry_run=true` returns the unified diff and touches nothing
+- **Credential files are refused** — `file_get` and `file_put` will not open `shadow`, `sudoers`, `authorized_keys` or private keys
+- **Tool annotations** — every tool declares `readOnlyHint` / `destructiveHint`, so the client can gate destructive calls by protocol rather than by trusting the model to read a description
+- **Container runs as non-root** — `mcpuser` (UID 1000), all Linux capabilities dropped, `no-new-privileges`
 - **SSH key path validation** — only keys from `/app/keys/` are accepted
 - **TLS check port allowlist** — `tls_check` only connects to ports: `80, 443, 465, 993, 995, 8080, 8443`
-- **Audit log** — every tool call is logged to `/audit/audit.jsonl` with timestamp and args
+- **Audit log** — every tool call is logged to `/audit/audit.jsonl` with timestamp, args and outcome (`ok`, `refused`, `error`)
 
 ---
 
@@ -135,6 +141,25 @@ ssh-keyscan -H 10.0.0.5 >> /opt/devops-mcp/ssh/known_hosts
 Then pass  in . Hosts not in  will be rejected.
 
 > The  file is mounted read-only into the container and gitignored — it never ends up in source control.
+
+---
+
+## Editing Remote Files
+
+`ssh_exec` runs everything through a shell, so writing a config with it means fighting
+quoting rules and a 500 character ceiling. `file_get` / `file_put` use SFTP instead —
+the bytes travel as bytes.
+
+```
+file_put(host="10.0.0.5", user="deploy", key="/app/keys/my-server.pem",
+         path="/etc/nginx/conf.d/site.conf", content="...", dry_run=true)
+```
+
+The dry run returns a unified diff and writes nothing. Repeat with `confirmed=true` to
+apply it: the previous version is saved as `site.conf.bak_<timestamp>`, mode and owner
+are carried over, and the new content lands via a temporary file in the same directory,
+so a reader never sees a half-written config. A file that does not exist yet needs an
+explicit `mode`, because guessing `0644` on a config is how secrets end up world-readable.
 
 ---
 

@@ -62,20 +62,20 @@ async def db_query(args: dict) -> dict:
     timeout = min(float(args.get("timeout", 30)), 120)
 
     if db_type not in ("postgres", "mysql"):
-        return {"error": "type must be 'postgres' or 'mysql'"}
+        return {"error": "type must be 'postgres' or 'mysql'", "outcome": "refused"}
     if not host:
-        return {"error": "Parameter 'host' is required"}
+        return {"error": "Parameter 'host' is required", "outcome": "refused"}
     if not user:
-        return {"error": "Parameter 'user' is required"}
+        return {"error": "Parameter 'user' is required", "outcome": "refused"}
     if not database:
-        return {"error": "Parameter 'database' is required"}
+        return {"error": "Parameter 'database' is required", "outcome": "refused"}
     if not query:
-        return {"error": "Parameter 'query' is required"}
+        return {"error": "Parameter 'query' is required", "outcome": "refused"}
 
     try:
         validate_db_query(query, confirmed)
     except (ValueError, PermissionError) as e:
-        return {"error": str(e)}
+        return {"error": str(e), "outcome": "refused"}
 
     start = time.monotonic()
     try:

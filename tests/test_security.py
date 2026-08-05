@@ -239,7 +239,6 @@ class TestNginxContainer:
 # ---------------------------------------------------------------------------
 
 from security import validate_log_path
-import tempfile
 
 
 class TestLogPath:

@@ -1,3 +1,4 @@
+import hashlib
 import importlib
 import json
 import logging
@@ -11,7 +12,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Request
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
-from mcp.types import TextContent, Tool
+from mcp.types import TextContent, Tool, ToolAnnotations
 import uvicorn
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ from tools.prometheus import prometheus_query, prometheus_targets
 from tools.search_tools import search_web, search_ai
 from tools.server_health import get_server_health
 from tools.db_query import db_query
+from tools.file_transfer import file_get, file_put
 
 AUDIT_LOG_PATH = os.environ.get("AUDIT_LOG_PATH", "/audit/audit.jsonl")
 MCP_HOST = os.environ.get("MCP_HOST", "127.0.0.1")
@@ -44,6 +46,7 @@ _TOOL_MODULES = [
     "tools.search_tools",
     "tools.server_health",
     "tools.db_query",
+    "tools.file_transfer",
 ]
 
 
@@ -69,6 +72,7 @@ def _reload_tools() -> None:
     from tools.search_tools import search_web, search_ai
     from tools.server_health import get_server_health
     from tools.db_query import db_query
+    from tools.file_transfer import file_get, file_put
     with _DISPATCH_LOCK:
         _DISPATCH.update({
             "system_info": get_system_info, "docker_list": get_docker_list,
@@ -81,6 +85,7 @@ def _reload_tools() -> None:
             "search_web": search_web, "search_ai": search_ai,
             "server_health": get_server_health,
             "db_query": db_query,
+            "file_get": file_get, "file_put": file_put,
         })
     print("[watcher] tools reloaded", flush=True)
 
@@ -127,13 +132,31 @@ app = FastAPI(title="DevOps MCP Server", docs_url=None, redoc_url=None, lifespan
 mcp_server = Server("devops-mcp")
 transport = SseServerTransport("/messages/")
 
+# Annotations tell the client what a tool does before it runs, so "ask the user
+# first" stops depending on the model reading a description and deciding to care.
+def _read_only(title: str, open_world: bool = False) -> ToolAnnotations:
+    return ToolAnnotations(
+        title=title, readOnlyHint=True, destructiveHint=False,
+        idempotentHint=True, openWorldHint=open_world,
+    )
+
+
+def _mutating(title: str, destructive: bool = True) -> ToolAnnotations:
+    return ToolAnnotations(
+        title=title, readOnlyHint=False, destructiveHint=destructive,
+        idempotentHint=False, openWorldHint=True,
+    )
+
+
 _TOOLS = [
     Tool(
+        annotations=_read_only("System info"),
         name="system_info",
         description="CPU, RAM, disk usage and system uptime",
         inputSchema={"type": "object", "properties": {}, "required": []},
     ),
     Tool(
+        annotations=_read_only("Docker containers"),
         name="docker_list",
         description="List Docker containers with status",
         inputSchema={
@@ -145,6 +168,7 @@ _TOOLS = [
         },
     ),
     Tool(
+        annotations=_read_only("TLS certificate check", True),
         name="tls_check",
         description="Check TLS certificate: expiry, CN, SAN, cipher",
         inputSchema={
@@ -158,6 +182,7 @@ _TOOLS = [
         },
     ),
     Tool(
+        annotations=_read_only("Container logs"),
         name="docker_logs",
         description="Get last N log lines from a Docker container",
         inputSchema={
@@ -172,6 +197,7 @@ _TOOLS = [
         },
     ),
     Tool(
+        annotations=_read_only("Inspect container"),
         name="docker_inspect",
         description="Inspect a Docker container: image, ports, volumes, env, network",
         inputSchema={
@@ -183,6 +209,7 @@ _TOOLS = [
         },
     ),
     Tool(
+        annotations=_read_only("Tail log file"),
         name="log_tail",
         description="Read last N lines from an allowed log file",
         inputSchema={
@@ -196,6 +223,7 @@ _TOOLS = [
         },
     ),
     Tool(
+        annotations=_read_only("nginx config test"),
         name="nginx_test",
         description="Run nginx -t inside a container to validate config",
         inputSchema={
@@ -206,6 +234,7 @@ _TOOLS = [
         },
     ),
     Tool(
+        annotations=_mutating("Start/stop container"),
         name="docker_control",
         description=(
             "Start, stop, or restart a Docker container. "
@@ -226,6 +255,7 @@ _TOOLS = [
         },
     ),
     Tool(
+        annotations=_read_only("Container stats"),
         name="docker_stats",
         description="Get CPU, memory and network stats for a running Docker container",
         inputSchema={
@@ -237,6 +267,7 @@ _TOOLS = [
         },
     ),
     Tool(
+        annotations=_read_only("systemd unit status"),
         name="systemd_status",
         description="Get systemd unit status: active state, sub state, description, memory, PID",
         inputSchema={
@@ -252,6 +283,7 @@ _TOOLS = [
         },
     ),
     Tool(
+        annotations=_read_only("PromQL query", True),
         name="prometheus_query",
         description="Execute a PromQL query against Prometheus. Supports instant and range queries.",
         inputSchema={
@@ -267,6 +299,7 @@ _TOOLS = [
         },
     ),
     Tool(
+        annotations=_read_only("Prometheus targets", True),
         name="prometheus_targets",
         description="List Prometheus scrape targets and their health status",
         inputSchema={
@@ -277,11 +310,13 @@ _TOOLS = [
         },
     ),
     Tool(
+        annotations=_read_only("Server health"),
         name="server_health",
         description="Full server health report: uptime, CPU, RAM, disk, Docker containers, failed systemd units",
         inputSchema={"type": "object", "properties": {}, "required": []},
     ),
     Tool(
+        annotations=_read_only("Web search", True),
         name="search_web",
         description="Search the web via Google (SerpAPI). Returns titles, URLs and snippets.",
         inputSchema={
@@ -294,6 +329,7 @@ _TOOLS = [
         },
     ),
     Tool(
+        annotations=_read_only("Semantic search", True),
         name="search_ai",
         description="Semantic search via EXA — finds dev docs, GitHub, engineering articles. Better than Google for technical queries.",
         inputSchema={
@@ -306,6 +342,7 @@ _TOOLS = [
         },
     ),
     Tool(
+        annotations=_mutating("Run command over SSH"),
         name="ssh_exec",
         description=(
             "Execute a command on a remote server via SSH. "
@@ -334,6 +371,7 @@ _TOOLS = [
         },
     ),
     Tool(
+        annotations=_mutating("SQL query"),
         name="db_query",
         description="Execute SQL query on PostgreSQL or MySQL database. Read-only queries (SELECT, SHOW, DESCRIBE, EXPLAIN) work without confirmation. Write queries require confirmed=true. GRANT/REVOKE/user management always blocked.",
         inputSchema={
@@ -350,6 +388,60 @@ _TOOLS = [
                 "confirmed": {"type": "boolean", "description": "Required for mutating queries (INSERT/UPDATE/DELETE/DDL)"},
             },
             "required": ["host", "user", "database", "query"],
+        },
+    ),
+    Tool(
+        annotations=_read_only("Read remote file"),
+        name="file_get",
+        description=(
+            "Read a file from a remote server over SFTP. No shell involved, so content "
+            "with quotes, semicolons or backticks comes back verbatim. Returns content, "
+            "size, mode, owner and sha256. Credential files (shadow, sudoers, private "
+            "keys, authorized_keys) are refused."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "host": {"type": "string", "description": "Remote host IP or hostname"},
+                "user": {"type": "string", "description": "SSH username"},
+                "key": {"type": "string", "description": "Path to SSH key on VPS, e.g. /app/keys/vps.pem"},
+                "password": {"type": "string", "description": "SSH password (alternative to key)"},
+                "path": {"type": "string", "description": "Absolute path of the file to read"},
+                "max_bytes": {"type": "integer", "description": "Read at most N bytes (default and max 524288)"},
+                "timeout": {"type": "integer", "description": "Timeout in seconds (default 30, max 120)"},
+                "verify_host_key": {"type": "boolean", "description": "Reject unknown hosts (default: false)"},
+            },
+            "required": ["host", "user", "path"],
+        },
+    ),
+    Tool(
+        annotations=_mutating("Write remote file"),
+        name="file_put",
+        description=(
+            "Write a file on a remote server over SFTP: no shell, no length limit, no "
+            "quoting problems. Keeps the existing mode and owner, writes through a "
+            "temporary file in the same directory and renames it into place, and saves "
+            "path.bak_<timestamp> first. Run with dry_run=true to get the unified diff "
+            "without touching anything; the actual write requires confirmed=true. "
+            "A file that does not exist yet needs an explicit mode."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "host": {"type": "string", "description": "Remote host IP or hostname"},
+                "user": {"type": "string", "description": "SSH username"},
+                "key": {"type": "string", "description": "Path to SSH key on VPS, e.g. /app/keys/vps.pem"},
+                "password": {"type": "string", "description": "SSH password (alternative to key)"},
+                "path": {"type": "string", "description": "Absolute path of the file to write"},
+                "content": {"type": "string", "description": "Full new content of the file"},
+                "mode": {"type": "string", "description": "Octal mode for a new file, e.g. '0640'. Overrides the existing mode when given."},
+                "backup": {"type": "boolean", "description": "Save path.bak_<timestamp> before overwriting (default true)"},
+                "dry_run": {"type": "boolean", "description": "Return the diff without writing (default false)"},
+                "confirmed": {"type": "boolean", "description": "Required for the actual write. Set only after explicit user approval."},
+                "timeout": {"type": "integer", "description": "Timeout in seconds (default 30, max 120)"},
+                "verify_host_key": {"type": "boolean", "description": "Reject unknown hosts (default: false)"},
+            },
+            "required": ["host", "user", "path", "content"],
         },
     ),
 ]
@@ -374,14 +466,39 @@ _DISPATCH = {
     "search_ai": search_ai,
     "server_health": get_server_health,
     "db_query": db_query,
+    "file_get": file_get,
+    "file_put": file_put,
 }
 
 
-_SENSITIVE_KEYS = {"password", "passwd", "secret", "token", "key"}
+_SENSITIVE_KEYS = {"password", "passwd", "secret", "token"}
+
+# Which key we connected with is the fact the audit exists to record, so a path
+# under /app/keys/ is kept. Anything else in a field named 'key' is treated as
+# a secret, because some future tool will put one there.
+_KEY_PATH_PREFIX = "/app/keys/"
+
+# file_put sends whole config files. Storing them verbatim would turn the audit
+# log into a config archive; the hash still proves what was written.
+_MAX_AUDIT_VALUE = 200
+
+
+def _sanitize_value(name: str, value):
+    lowered = name.lower()
+    if lowered in _SENSITIVE_KEYS:
+        return "***"
+    if lowered == "key":
+        if isinstance(value, str) and value.startswith(_KEY_PATH_PREFIX):
+            return value
+        return "***"
+    if isinstance(value, str) and len(value) > _MAX_AUDIT_VALUE:
+        digest = hashlib.sha256(value.encode("utf-8", "replace")).hexdigest()[:12]
+        return f"<{len(value)} chars, sha256={digest}>"
+    return value
 
 
 def _sanitize_args(args: dict) -> dict:
-    return {k: "***" if k.lower() in _SENSITIVE_KEYS else v for k, v in args.items()}
+    return {k: _sanitize_value(k, v) for k, v in args.items()}
 
 
 def _write_audit(tool: str, args: dict, status: str, error: str | None, duration_ms: int) -> None:
@@ -418,6 +535,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if handler is None:
             raise ValueError(f"Unknown tool: {name}")
         result = await handler(arguments)
+        # Tools report failure by returning {"error": ...} rather than raising, so
+        # without this the audit recorded every refusal and every failed login as
+        # "ok". Tools that know they refused say so via "outcome".
+        if isinstance(result, dict) and result.get("error"):
+            error_msg = str(result["error"])
+            status = result.get("outcome") or "error"
         text = json.dumps(result, ensure_ascii=False, indent=2)
         return [TextContent(type="text", text=text)]
     except Exception as e:

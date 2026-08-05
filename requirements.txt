@@ -1,13 +1,17 @@
-mcp>=1.20.0
-fastapi>=0.115.0
-uvicorn[standard]>=0.34.0
-psutil>=6.1.0
-docker>=7.1.0
-anyio>=4.7.0
-dbus-fast>=2.0.0
-watchdog>=4.0.0
-paramiko>=3.0.0
-httpx>=0.27.0
-asyncpg>=0.29.0
-aiomysql>=0.2.0
-pytest>=8.0.0
+# Pinned to what the running container actually has, not to whatever is newest.
+# The image is rebuilt rarely, so an unpinned bump lands as a surprise during a
+# deploy — paramiko in particular is what every SSH and SFTP tool runs on.
+# To bump: change a line, deploy.sh, then check `docker exec devops-mcp pip freeze`.
+mcp==1.27.0
+fastapi==0.136.1
+uvicorn[standard]==0.46.0
+psutil==7.2.2
+docker==7.1.0
+anyio==4.13.0
+dbus-fast==4.0.4
+watchdog==6.0.0
+paramiko==4.0.0
+httpx==0.28.1
+asyncpg==0.31.0
+aiomysql==0.3.2
+pytest==9.0.3

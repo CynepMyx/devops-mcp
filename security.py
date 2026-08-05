@@ -1,5 +1,5 @@
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 NGINX_CONTAINER_ALLOWLIST = frozenset([
     "nginx",
@@ -135,29 +135,6 @@ def validate_nginx_container(name: str) -> None:
         raise ValueError(f"Invalid container name format: {name}")
     if name not in NGINX_CONTAINER_ALLOWLIST:
         raise PermissionError(f"Container not in allowlist: {name}")
-
-
-_DB_READ_PREFIXES = frozenset(('select', 'show', 'describe', 'desc', 'explain', 'with'))
-_DB_WRITE_PREFIXES = frozenset(('insert', 'update', 'delete', 'replace', 'call', 'do'))
-_DB_DDL_PREFIXES = frozenset(('create', 'drop', 'alter', 'truncate', 'rename'))
-_DB_PRIV_PREFIXES = frozenset(('grant', 'revoke'))
-
-
-def validate_db_query(query: str, confirmed: bool) -> None:
-    if len(query) > 10000:
-        raise ValueError("Query too long (max 10000 chars)")
-    tokens = query.strip().split()
-    if not tokens:
-        raise ValueError("Empty query")
-    first = tokens[0].lower()
-    if first in _DB_PRIV_PREFIXES:
-        raise PermissionError("GRANT/REVOKE operations are not allowed")
-    if first in _DB_WRITE_PREFIXES or first in _DB_DDL_PREFIXES:
-        if not confirmed:
-            raise ValueError(
-                f"Query '{first.upper()}' modifies data. "
-                "Repeat with confirmed=true after user approval."
-            )
 
 
 def validate_ssh_key_path(path: str) -> None:
@@ -313,6 +290,50 @@ def validate_ssh_command(command: str, confirmed: bool) -> None:
             )
 
 
+# ---------------------------------------------------------------------------
+# Remote file transfer (file_get / file_put) — deny-list model
+#
+# Unlike ssh_exec, these tools do not go through a shell at all, so there is no
+# syntax to validate. What is left is the target itself: credential material is
+# refused outright, because reading it only feeds secrets into the model's
+# context and writing it is never part of a config change.
+# ---------------------------------------------------------------------------
+
+MAX_FILE_BYTES = 512 * 1024
+
+_FILE_DENY_EXACT = frozenset({
+    "/etc/shadow", "/etc/shadow-", "/etc/gshadow", "/etc/gshadow-", "/etc/sudoers",
+})
+_FILE_DENY_PREFIX = ("/etc/sudoers.d/", "/proc/", "/sys/", "/dev/")
+_FILE_DENY_NAMES = frozenset({
+    "authorized_keys", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
+})
+_FILE_DENY_SUFFIX = (".pem", ".key", ".pfx", ".p12")
+
+
+def validate_remote_file_path(path: str) -> str:
+    """Validate a path on a remote host; return it normalized."""
+    if "\x00" in path:
+        raise PermissionError("Null byte in path")
+    if not path.startswith("/"):
+        raise ValueError("Path must be absolute")
+
+    parts = PurePosixPath(path).parts
+    if ".." in parts:
+        raise PermissionError("Path traversal not allowed")
+
+    normalized = str(PurePosixPath(path))
+    name = PurePosixPath(normalized).name
+
+    if normalized in _FILE_DENY_EXACT or name in _FILE_DENY_NAMES:
+        raise PermissionError(f"Refusing to touch credential file: {path}")
+    if name.endswith(_FILE_DENY_SUFFIX):
+        raise PermissionError(f"Refusing to touch key material: {path}")
+    if normalized.startswith(_FILE_DENY_PREFIX):
+        raise PermissionError(f"Path not allowed: {path}")
+    return normalized
+
+
 def validate_host_port(host: str, port: int) -> None:
     if not re.match(r'^[a-zA-Z0-9._-]+$', host):
         raise ValueError(f"Invalid hostname format: {host}")
@@ -326,12 +347,10 @@ def validate_host_port(host: str, port: int) -> None:
 # DB query validation — whitelist model for SQL
 # ---------------------------------------------------------------------------
 
-import re as _re
-
 _DB_COMMENT_PATTERNS = [
-    _re.compile(r'/\*.*?\*/', _re.DOTALL),
-    _re.compile(r'--[^\n]*'),
-    _re.compile(r'#[^\n]*'),
+    re.compile(r'/\*.*?\*/', re.DOTALL),
+    re.compile(r'--[^\n]*'),
+    re.compile(r'#[^\n]*'),
 ]
 
 _DB_READ_PREFIXES = frozenset({
@@ -351,14 +370,14 @@ _DB_PRIV_PREFIXES = frozenset({
     "grant", "revoke",
 })
 
-_DB_PRIV_PATTERNS = _re.compile(
+_DB_PRIV_PATTERNS = re.compile(
     r'\b(CREATE\s+USER|DROP\s+USER|ALTER\s+USER|'
-    r'CREATE\s+ROLE|DROP\s+ROLE)\b', _re.IGNORECASE
+    r'CREATE\s+ROLE|DROP\s+ROLE)\b', re.IGNORECASE
 )
 
-_DB_DANGER_PATTERNS = _re.compile(
+_DB_DANGER_PATTERNS = re.compile(
     r'\b(INTO\s+(OUT|DUMP)FILE|LOAD_FILE|lo_import|lo_export|'
-    r'pg_read_file|pg_write_file|COPY\b)', _re.IGNORECASE
+    r'pg_read_file|pg_write_file|COPY\b)', re.IGNORECASE
 )
 
 

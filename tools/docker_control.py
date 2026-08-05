@@ -12,7 +12,8 @@ _DESTRUCTIVE = {"stop", "restart"}
 
 def _control(action: str, name: str) -> dict:
     if name in PROTECTED:
-        return {"error": f"Container '{name}' is protected and cannot be controlled"}
+        return {"error": f"Container '{name}' is protected and cannot be controlled",
+                "outcome": "refused"}
 
     client = docker.from_env(timeout=10)
     try:
@@ -42,18 +43,20 @@ async def docker_control(args: dict) -> dict:
     confirmed = bool(args.get("confirmed", False))
 
     if not action:
-        return {"error": "Parameter 'action' is required (restart|stop|start)"}
+        return {"error": "Parameter 'action' is required (restart|stop|start)", "outcome": "refused"}
     if not name:
-        return {"error": "Parameter 'name' is required"}
+        return {"error": "Parameter 'name' is required", "outcome": "refused"}
     if action not in ("restart", "stop", "start"):
-        return {"error": f"Invalid action '{action}'. Must be one of: restart, stop, start"}
+        return {"error": f"Invalid action '{action}'. Must be one of: restart, stop, start",
+                "outcome": "refused"}
 
     if action in _DESTRUCTIVE and not confirmed:
         return {
             "error": (
                 f"Action '{action}' on container '{name}' requires explicit confirmation. "
                 "Repeat the call with confirmed=true after the user approves."
-            )
+            ),
+            "outcome": "refused",
         }
 
     try:
