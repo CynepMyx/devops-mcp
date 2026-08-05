@@ -431,7 +431,10 @@ _TOOLS = [
             "temporary file in the same directory and renames it into place, and saves "
             "path.bak_<timestamp> first. Run with dry_run=true to get the unified diff "
             "without touching anything; the actual write requires confirmed=true. "
-            "A file that does not exist yet needs an explicit mode."
+            "A file that does not exist yet needs an explicit mode. "
+            "Pass verify_cmd (a config test such as 'nginx -t') to have the new file "
+            "checked right after it lands: if the check fails, the previous content is "
+            "put back automatically and the response says so."
         ),
         inputSchema={
             "type": "object",
@@ -445,6 +448,8 @@ _TOOLS = [
                 "mode": {"type": "string", "description": "Octal mode for a new file, e.g. '0640'. Overrides the existing mode when given."},
                 "backup": {"type": "boolean", "description": "Save path.bak_<timestamp> before overwriting (default true)"},
                 "dry_run": {"type": "boolean", "description": "Return the diff without writing (default false)"},
+                "verify_cmd": {"type": "string", "description": "Config test to run after writing, e.g. 'nginx -t', 'apachectl configtest', 'php -l /path/file.php'. Must be a test command, not arbitrary shell."},
+                "rollback_on_failure": {"type": "boolean", "description": "Restore the previous content if verify_cmd exits non-zero (default true)"},
                 "confirmed": {"type": "boolean", "description": "Required for the actual write. Set only after explicit user approval."},
                 "timeout": {"type": "integer", "description": "Timeout in seconds (default 30, max 120)"},
                 "verify_host_key": {"type": "boolean", "description": "Reject unknown hosts (default: false)"},

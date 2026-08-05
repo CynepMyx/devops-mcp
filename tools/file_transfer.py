@@ -22,7 +22,12 @@ from datetime import datetime, timezone
 
 import paramiko
 
-from security import MAX_FILE_BYTES, validate_remote_file_path, validate_ssh_key_path
+from security import (
+    MAX_FILE_BYTES,
+    validate_remote_file_path,
+    validate_ssh_key_path,
+    validate_verify_command,
+)
 
 KNOWN_HOSTS_PATH = os.environ.get("SSH_KNOWN_HOSTS", "/app/ssh/known_hosts")
 ALLOW_SSH_PASSWORD = os.environ.get("ALLOW_SSH_PASSWORD", "false").lower() == "true"
@@ -161,13 +166,62 @@ def _get_sync(host, user, key_path, password, timeout, verify_host_key,
     return result
 
 
-def _backup_name(path: str) -> str:
+def _backup_name(sftp, path: str) -> str:
+    """Pick a free backup name. The stamp is per second, and two writes can land
+    inside the same second, which would silently overwrite the older copy."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    return f"{path}.bak_{stamp}"
+    candidate = f"{path}.bak_{stamp}"
+    for suffix in range(2, 50):
+        try:
+            sftp.stat(candidate)
+        except IOError:
+            return candidate
+        candidate = f"{path}.bak_{stamp}-{suffix}"
+    raise IOError(f"Could not find a free backup name for {path}")
+
+
+def _exec(client, command: str, timeout: int) -> dict:
+    stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+    out = stdout.read().decode(errors="replace")
+    err = stderr.read().decode(errors="replace")
+    return {
+        "command": command,
+        "exit_code": stdout.channel.recv_exit_status(),
+        "stdout": out[-4000:],
+        "stderr": err[-4000:],
+    }
+
+
+def _write_atomic(sftp, path: str, payload: bytes, target_mode: int,
+                  owner: tuple | None, exists: bool, warnings: list) -> None:
+    """Write through a temporary file in the same directory, then rename over."""
+    tmp_path = posixpath.join(
+        posixpath.dirname(path) or "/",
+        f".{posixpath.basename(path)}.mcp_tmp_{os.getpid()}",
+    )
+    with sftp.open(tmp_path, "wb") as fh:
+        fh.write(payload)
+    sftp.chmod(tmp_path, target_mode)
+    if owner:
+        try:
+            sftp.chown(tmp_path, owner[0], owner[1])
+        except (IOError, OSError) as exc:
+            warnings.append(
+                f"Could not restore owner {owner[0]}:{owner[1]} ({exc}). "
+                "File is owned by the connecting user."
+            )
+    try:
+        sftp.posix_rename(tmp_path, path)
+    except (IOError, OSError, AttributeError):
+        if exists:
+            sftp.remove(path)
+        sftp.rename(tmp_path, path)
+        warnings.append("Server lacks posix-rename; used remove+rename")
 
 
 def _put_sync(host, user, key_path, password, timeout, verify_host_key,
-              path, payload: bytes, mode, backup, dry_run) -> dict:
+              path, payload: bytes, mode, backup, dry_run,
+              verify_cmd=None, rollback=True) -> dict:
     client, host_key = _connect(host, user, key_path, password, timeout, verify_host_key)
     warnings: list[str] = []
     try:
@@ -241,47 +295,60 @@ def _put_sync(host, user, key_path, password, timeout, verify_host_key,
             if dry_run:
                 summary["written"] = False
                 summary["dry_run"] = True
+                if verify_cmd:
+                    summary["verify_planned"] = verify_cmd
                 return summary
 
             backup_path = None
             if exists and backup:
-                backup_path = _backup_name(path)
+                backup_path = _backup_name(sftp, path)
                 with sftp.open(backup_path, "wb") as fh:
                     fh.write(old_bytes)
                 sftp.chmod(backup_path, stat_mod.S_IMODE(st.st_mode))
 
-            tmp_path = posixpath.join(
-                posixpath.dirname(path) or "/",
-                f".{posixpath.basename(path)}.mcp_tmp_{os.getpid()}",
-            )
-            with sftp.open(tmp_path, "wb") as fh:
-                fh.write(payload)
-            sftp.chmod(tmp_path, target_mode)
-            if exists:
-                try:
-                    sftp.chown(tmp_path, st.st_uid, st.st_gid)
-                except (IOError, OSError) as exc:
-                    warnings.append(
-                        f"Could not restore owner {st.st_uid}:{st.st_gid} ({exc}). "
-                        "File is owned by the connecting user."
-                    )
-            try:
-                sftp.posix_rename(tmp_path, path)
-            except (IOError, OSError, AttributeError):
-                if exists:
-                    sftp.remove(path)
-                sftp.rename(tmp_path, path)
-                warnings.append("Server lacks posix-rename; used remove+rename")
-
+            owner = (st.st_uid, st.st_gid) if exists else None
+            _write_atomic(sftp, path, payload, target_mode, owner, exists, warnings)
             written = sftp.stat(path)
+
+            # Checking the config we just wrote, and putting the old one back when
+            # the check fails, is the whole point: a bad config on a client server
+            # is only harmless for as long as nothing reloads it.
+            if verify_cmd:
+                verify = _exec(client, verify_cmd, timeout)
+                summary["verify"] = verify
+                if verify["exit_code"] != 0:
+                    summary["verify_failed"] = True
+                    if rollback:
+                        if exists:
+                            _write_atomic(sftp, path, old_bytes, target_mode,
+                                          owner, True, warnings)
+                            written = sftp.stat(path)
+                        else:
+                            sftp.remove(path)
+                            written = None
+                        summary["rolled_back"] = True
+                        summary["verify_after_rollback"] = _exec(client, verify_cmd, timeout)
+                        if backup_path:
+                            # Nothing changed in the end, so the copy is just litter.
+                            try:
+                                sftp.remove(backup_path)
+                                backup_path = None
+                            except (IOError, OSError):
+                                warnings.append(f"Could not remove backup {backup_path}")
+                    else:
+                        summary["rolled_back"] = False
+                        warnings.append(
+                            "Verification failed and rollback_on_failure=false: "
+                            "the new content is still in place."
+                        )
         finally:
             sftp.close()
     finally:
         client.close()
 
-    summary["written"] = True
+    summary["written"] = not summary.get("rolled_back", False)
     summary["backup"] = backup_path
-    summary["result"] = _describe(written)
+    summary["result"] = _describe(written) if written else None
     if warnings:
         summary["warnings"] = warnings
     return summary
@@ -327,6 +394,8 @@ async def file_put(args: dict) -> dict:
     dry_run = bool(args.get("dry_run", False))
     confirmed = bool(args.get("confirmed", False))
     mode_arg = args.get("mode")
+    verify_cmd = (args.get("verify_cmd") or "").strip()
+    rollback = bool(args.get("rollback_on_failure", True))
 
     try:
         host, user, key_path, password, timeout, verify_host_key = _common_args(args)
@@ -337,6 +406,8 @@ async def file_put(args: dict) -> dict:
         if not isinstance(content, str):
             raise ValueError("Parameter 'content' must be a string")
         path = validate_remote_file_path(path_arg)
+        if verify_cmd:
+            validate_verify_command(verify_cmd)
 
         payload = content.encode("utf-8")
         if len(payload) > MAX_FILE_BYTES:
@@ -364,8 +435,11 @@ async def file_put(args: dict) -> dict:
     try:
         result = await asyncio.wait_for(
             asyncio.to_thread(_put_sync, host, user, key_path, password, timeout,
-                              verify_host_key, path, payload, mode, backup, dry_run),
-            timeout=timeout + 15,
+                              verify_host_key, path, payload, mode, backup, dry_run,
+                              verify_cmd or None, rollback),
+            # The verification and a possible rollback each need their own round
+            # trip after the write, so the outer deadline has to allow for them.
+            timeout=timeout * 3 + 15,
         )
     except asyncio.TimeoutError:
         return {"error": f"SFTP timed out after {timeout}s"}

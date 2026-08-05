@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.0] - 2026-08-05
+
+### Added
+- `file_put` can check what it wrote and undo it. Pass `verify_cmd` (`nginx -t`, `apachectl configtest`, `sshd -t`, `php -l`, `named-checkconf`, `haproxy -c`, `systemd-analyze verify`, `docker compose config` and similar) and the test runs against the new file over the same connection. On a non-zero exit the previous content goes back atomically, the test runs again to prove the server is where it started, and the backup that is no longer needed is removed. The response carries `verify`, `rolled_back` and `verify_after_rollback`. `rollback_on_failure=false` keeps the new content instead.
+- `verify_cmd` is restricted to config tests. It fires automatically as part of a write, so it must be a test rather than a general shell, and operators, redirects and substitutions are rejected inside it. Anything else belongs in `ssh_exec`, where the user sees it as its own call.
+
+### Fixed
+- Backup names carried a per-second timestamp, so two writes to the same file inside one second silently overwrote the first copy. Names are now checked for collisions and get a `-2` suffix.
+- `scripts/smoke_file_transfer.py` refuses to run against an existing target. Its first checks are about creating a file, and a leftover from an earlier run made them pass for the wrong reason.
+
 ## [0.3.0] - 2026-08-05
 
 ### Fixed

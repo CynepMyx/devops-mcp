@@ -21,7 +21,7 @@ Deploy it once on your server. Connect any MCP-compatible client.
 | `docker_control` | Start, stop, or restart a container |
 | `ssh_exec` | Execute commands on remote hosts via SSH key |
 | `file_get` | Read a remote file over SFTP — no shell, no quoting problems |
-| `file_put` | Write a remote file over SFTP, with diff preview, backup and preserved mode |
+| `file_put` | Write a remote file over SFTP: diff preview, backup, preserved mode, config test with automatic rollback |
 | `db_query` | Run SQL against PostgreSQL or MySQL; writes require confirmation |
 | `log_tail` | Read system log files (syslog, nginx, auth, etc.) |
 | `nginx_test` | Run nginx -t config validation |
@@ -169,6 +169,29 @@ apply it: the previous version is saved as `site.conf.bak_<timestamp>`, mode and
 are carried over, and the new content lands via a temporary file in the same directory,
 so a reader never sees a half-written config. A file that does not exist yet needs an
 explicit `mode`, because guessing `0644` on a config is how secrets end up world-readable.
+
+### Check it, and put the old one back if it fails
+
+A broken config is harmless right up until something reloads it. Pass `verify_cmd` and
+the check runs against what was just written:
+
+```
+file_put(host="10.0.0.5", user="deploy", key="/app/keys/my-server.pem",
+         path="/etc/nginx/conf.d/site.conf", content="...",
+         verify_cmd="nginx -t", confirmed=true)
+```
+
+If the test exits non-zero, the previous content is restored, the same test is run again
+to prove the server is back where it started, and the now-pointless backup is removed.
+The response carries `verify`, `rolled_back` and `verify_after_rollback`, so the failure
+is visible rather than inferred. Set `rollback_on_failure=false` to keep the new content
+anyway.
+
+`verify_cmd` accepts config tests only (`nginx -t`, `apachectl configtest`, `sshd -t`,
+`php -l`, `named-checkconf`, `haproxy -c`, `systemd-analyze verify`, `docker compose
+config`, and similar). It runs automatically as part of a write, so it has to be a test
+and not a general shell; anything else belongs in `ssh_exec`, where it shows up as its
+own call.
 
 ---
 

@@ -60,6 +60,13 @@ def main():
         print("Set SMOKE_HOST, SMOKE_USER, SMOKE_KEY and SMOKE_PATH first.")
         return 2
 
+    # The first checks are about creating a file, so a leftover from an earlier
+    # run would make them pass for the wrong reason.
+    probe = run(file_get({**HOST, "path": TARGET}))
+    if probe.get("content") is not None or probe.get("size") is not None:
+        print(f"{TARGET} already exists. Point SMOKE_PATH at a fresh name.")
+        return 2
+
     fails = []
 
     r = show("1. new file without mode", run(file_put({**HOST, "path": TARGET, "content": BODY_1, "confirmed": True})))
@@ -104,11 +111,60 @@ def main():
         if r.get("content") != BODY_1:
             fails.append("backup does not hold the previous content")
 
-    r = show("9. credential file", run(file_get({**HOST, "path": "/etc/shadow"})))
+    # The point of the whole tool: a config that fails its own test must not survive.
+    json_path = TARGET + ".json"
+    good = '{"listen": 443, "name": "smoke"}'
+    broken = '{"listen": 443, "name": "smoke",}'
+    check = "python3 -m json.tool " + json_path
+
+    r = show("9. create a valid json", run(file_put({**HOST, "path": json_path, "content": good,
+                                                     "mode": "0640", "confirmed": True})))
+    if not r.get("written"):
+        fails.append("could not create the json fixture")
+
+    r = show("10. write broken json with a check", run(file_put({
+        **HOST, "path": json_path, "content": broken, "confirmed": True,
+        "verify_cmd": check})))
+    if not r.get("verify_failed"):
+        fails.append("the check should have failed on broken json")
+    if not r.get("rolled_back"):
+        fails.append("a failed check must roll the file back")
+    if r.get("written"):
+        fails.append("written must be false after a rollback")
+    if r.get("backup"):
+        fails.append("the backup should be removed when nothing changed in the end")
+    if r.get("verify_after_rollback", {}).get("exit_code") != 0:
+        fails.append("the restored file should pass the same check")
+
+    r = show("11. the old content is back", run(file_get({**HOST, "path": json_path})))
+    if r.get("content") != good:
+        fails.append("rollback did not restore the previous content")
+    if r.get("mode") != "0o640":
+        fails.append("rollback did not restore the mode")
+
+    r = show("12. a valid change passes the check", run(file_put({
+        **HOST, "path": json_path, "content": '{"listen": 8443, "name": "smoke"}',
+        "confirmed": True, "verify_cmd": check})))
+    if not r.get("written") or r.get("rolled_back"):
+        fails.append("a valid config should be kept")
+    if r.get("verify", {}).get("exit_code") != 0:
+        fails.append("the check should pass on valid json")
+
+    backup_12 = r.get("backup")
+
+    r = show("13. broken json without rollback", run(file_put({
+        **HOST, "path": json_path, "content": broken, "confirmed": True,
+        "verify_cmd": check, "rollback_on_failure": False})))
+    if not r.get("verify_failed") or r.get("rolled_back") is not False:
+        fails.append("rollback_on_failure=false should keep the broken content")
+    if backup_12 and r.get("backup") == backup_12:
+        fails.append("two writes in the same second reused one backup name")
+
+    r = show("14. credential file", run(file_get({**HOST, "path": "/etc/shadow"})))
     if r.get("outcome") != "refused":
         fails.append("/etc/shadow should be refused")
 
-    r = show("10. write without confirmation", run(file_put({**HOST, "path": TARGET, "content": "x"})))
+    r = show("15. write without confirmation", run(file_put({**HOST, "path": TARGET, "content": "x"})))
     if r.get("outcome") != "refused":
         fails.append("write without confirmed should be refused")
 

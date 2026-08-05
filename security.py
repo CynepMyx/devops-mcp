@@ -334,6 +334,53 @@ def validate_remote_file_path(path: str) -> str:
     return normalized
 
 
+# Commands file_put may run by itself to check what it just wrote. This is a
+# short allowlist on purpose: the verification step fires automatically as part
+# of a write, so it has to be a test, not a general shell. Anything else, run
+# through ssh_exec where the user sees it as its own call.
+_VERIFY_PREFIXES = (
+    "nginx -t", "nginx -T", "/usr/sbin/nginx -t",
+    "apachectl configtest", "apache2ctl configtest", "httpd -t", "apachectl -t",
+    "sshd -t", "/usr/sbin/sshd -t",
+    "php -l", "php-fpm -t", "php-fpm7", "php-fpm8",
+    "named-checkconf", "named-checkzone",
+    "haproxy -c", "postfix check", "postconf",
+    "systemd-analyze verify",
+    "docker compose config", "docker-compose config",
+    "caddy validate", "traefik healthcheck",
+    "nft -c -f", "iptables-restore -t", "ip6tables-restore -t",
+    "python3 -m json.tool", "python -m json.tool",
+    "jq ", "yq ",
+    "visudo -c",
+    "crontab -T",
+    "wp config get",
+)
+
+
+def validate_verify_command(command: str) -> None:
+    """Check a verification command before file_put runs it automatically."""
+    stripped = command.strip()
+    if not stripped:
+        raise ValueError("Empty verify_cmd")
+    if len(stripped) > 500:
+        raise ValueError("verify_cmd exceeds maximum length of 500 characters")
+
+    mask, has_substitution = _mask_quotes(stripped)
+    if has_substitution:
+        raise ValueError("Shell injection pattern detected in verify_cmd")
+    if _OPERATOR_RE.search(mask) or re.search(r'>{1,2}\s*\S', mask):
+        raise ValueError(
+            "verify_cmd must be a single command without operators or redirects"
+        )
+
+    if not stripped.startswith(_VERIFY_PREFIXES):
+        raise PermissionError(
+            f"verify_cmd must be a config test. Allowed starts: "
+            f"{', '.join(sorted(p.strip() for p in _VERIFY_PREFIXES)[:8])} and similar. "
+            "For anything else use ssh_exec."
+        )
+
+
 def validate_host_port(host: str, port: int) -> None:
     if not re.match(r'^[a-zA-Z0-9._-]+$', host):
         raise ValueError(f"Invalid hostname format: {host}")

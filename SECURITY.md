@@ -20,6 +20,7 @@ can enforce that prompt by protocol instead of by convention.
 - **Unauthorized Docker container control** — `stop` and `restart` require `confirmed=true`
 - **Privilege escalation** — non-root container (mcpuser), all Linux capabilities dropped, `no-new-privileges`, source mounted read-only
 - **Remote file access** — `file_get` and `file_put` refuse `shadow`, `gshadow`, `sudoers`, `authorized_keys` and private keys outright; `file_put` needs `confirmed=true`, keeps mode and owner, and writes through a temporary file in the same directory
+- **Verified writes** — `file_put`'s optional `verify_cmd` restores the previous content when the check fails. Because that command runs automatically as part of a write, it is limited to config tests (`nginx -t` and the like) with no operators, redirects or substitutions; general execution stays in `ssh_exec`, where it appears as its own tool call the user can see and refuse
 - **Audit trail** — every tool call logged to `/audit/audit.jsonl` with an outcome of `ok`, `refused` or `error`; write failures emit a warning instead of being silently swallowed. File bodies and other long values are stored as `<N chars, sha256=...>`, so the log proves what was written without becoming a copy of it
 - **SSH password auth disabled** — password authentication off by default (ALLOW_SSH_PASSWORD=false)
 
