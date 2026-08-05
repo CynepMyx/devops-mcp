@@ -162,10 +162,34 @@ first call takes 220 ms and the ones after it 50 ms, and a twenty step diagnosti
 one connection instead of twenty. That second part matters as much as the speed: a burst
 of connections from one address is exactly what fail2ban is built to notice.
 
-The pool covers connections this server opens itself. If you reach a host through a
-second hop that the container does not control — an `ssh` or `sshpass` call inside the
-command, say — that hop is still a fresh connection every time, and the target sees the
-same burst it always did.
+The pool covers connections this server opens itself, including the ones it opens through
+a jump host. A second hop the container does not control — an `ssh` or `sshpass` call
+inside the command text — is still a fresh connection every time.
+
+## Reaching a Server Through Another One
+
+Pass `jump_host` and the credentials for it, and the connection is tunnelled:
+
+```
+ssh_exec(host="10.0.0.5", user="deploy", password="...",
+         jump_host="203.0.113.9", jump_user="ops", jump_key="/app/keys/bastion.pem",
+         command="uptime")
+```
+
+The jump host only carries bytes. Authentication with the target happens end to end
+inside the tunnel, so the target's password is never an argument to a command running on
+the intermediate box, where anyone with `ps` can read it. This is the same thing OpenSSH
+does with `ssh -J`.
+
+The alternative — running `ssh` or `sshpass` as a command on the jump host — costs more
+than it looks: the password lands in the process list, output travels through a second
+shell with a second round of quoting, the connection is outside the pool, and `file_get`
+and `file_put` cannot reach the target at all, because SFTP does not fit inside a command
+string. With `jump_host` all of that works normally.
+
+Jump connections are pooled and shared: ten client servers behind one bastion open one
+connection to the bastion. Closing it with `ssh_sessions` closes what rides on it, and
+the reaper leaves a jump host alone while anything is tunnelled through it.
 
 Commands still run as separate channels, so nothing carries over between them: no working
 directory, no environment, no shell state. That is on purpose. A persistent *shell* would

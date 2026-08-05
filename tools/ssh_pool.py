@@ -46,15 +46,18 @@ class CapturingWarningPolicy(paramiko.MissingHostKeyPolicy):
 
 
 class _Entry:
-    __slots__ = ("client", "host_key", "last_used", "created", "uses", "lock")
+    __slots__ = ("client", "host_key", "last_used", "created", "uses", "lock", "via")
 
-    def __init__(self, client, host_key):
+    def __init__(self, client, host_key, via=None):
         self.client = client
         self.host_key = host_key
         self.last_used = time.monotonic()
         self.created = time.monotonic()
         self.uses = 0
         self.lock = threading.Lock()
+        # The pooled connection this one tunnels through, if any. Closing that
+        # one takes this one with it.
+        self.via = via
 
     def alive(self) -> bool:
         transport = self.client.get_transport()
@@ -79,7 +82,8 @@ def _auth_id(key_path: str, password: str) -> str:
     return "pw:" + hashlib.sha256(password.encode("utf-8")).hexdigest()[:12]
 
 
-def _connect(host, port, user, key_path, password, timeout, verify_host_key):
+def _connect(host, port, user, key_path, password, timeout, verify_host_key,
+             sock=None):
     client = paramiko.SSHClient()
     known_hosts_loaded = False
     if os.path.isfile(KNOWN_HOSTS_PATH):
@@ -95,8 +99,9 @@ def _connect(host, port, user, key_path, password, timeout, verify_host_key):
         client.set_missing_host_key_policy(policy)
         host_key = {"mode": "warn", "known_hosts_loaded": known_hosts_loaded}
 
-    sock = socket.create_connection((host, port), timeout=timeout)
-    sock.settimeout(timeout)
+    if sock is None:
+        sock = socket.create_connection((host, port), timeout=timeout)
+        sock.settimeout(timeout)
     connect_kwargs = dict(
         hostname=host, sock=sock, username=user, timeout=timeout,
         auth_timeout=timeout, banner_timeout=timeout,
@@ -126,7 +131,12 @@ def _reap(now: float | None = None) -> int:
     now = now if now is not None else time.monotonic()
     closed = 0
     with _POOL_LOCK:
+        # A jump host carries other people's connections. Closing it because it
+        # looks idle would drop every client server tunnelled through it.
+        carrying = {id(e.via) for e in _POOL.values() if e.via is not None}
         for key, entry in list(_POOL.items()):
+            if id(entry) in carrying:
+                continue
             if now - entry.last_used <= IDLE_TTL and entry.alive():
                 continue
             # last_used is only refreshed once a command finishes, so a long
@@ -168,15 +178,52 @@ def _evict_oldest_locked() -> None:
     entry.close()
 
 
+def _jump_key(jump: dict | None) -> tuple:
+    if not jump:
+        return ()
+    return (jump["host"], jump.get("port", 22), jump["user"],
+            _auth_id(jump.get("key", ""), jump.get("password", "")))
+
+
+def _open_via(jump: dict, host: str, port: int, timeout: int):
+    """Get a channel to host:port through a pooled connection to the jump host.
+
+    The jump host only carries bytes: authentication with the target happens
+    end to end inside this channel, so its password never becomes an argument
+    to a command running on the jump box.
+    """
+    jump_entry, _ = acquire(
+        jump["host"], jump["user"], jump.get("key", ""), jump.get("password", ""),
+        port=jump.get("port", 22), timeout=timeout,
+        verify_host_key=jump.get("verify_host_key", False),
+    )
+    transport = jump_entry.client.get_transport()
+    if transport is None or not transport.is_active():
+        drop(jump_entry)
+        raise paramiko.SSHException(f"Jump host {jump['host']} is not connected")
+    # No lock here on purpose: paramiko opens channels concurrently, and holding
+    # the jump entry's lock would serialise every client server behind whatever
+    # command happens to be running on the jump host itself.
+    channel = transport.open_channel(
+        "direct-tcpip", (host, port), ("127.0.0.1", 0), timeout=timeout,
+    )
+    touch(jump_entry)
+    return channel, jump_entry
+
+
 def acquire(host, user, key_path="", password="", port=22, timeout=30,
-            verify_host_key=False):
+            verify_host_key=False, jump=None):
     """Return (entry, reused). The caller runs inside `with entry.lock`."""
-    key = (host, port, user, _auth_id(key_path, password), bool(verify_host_key))
+    key = (host, port, user, _auth_id(key_path, password), bool(verify_host_key),
+           _jump_key(jump))
 
     if not POOL_ENABLED:
+        sock, jump_entry = (None, None)
+        if jump:
+            sock, jump_entry = _open_via(jump, host, port, timeout)
         client, host_key = _connect(host, port, user, key_path, password,
-                                    timeout, verify_host_key)
-        return _Entry(client, host_key), False
+                                    timeout, verify_host_key, sock=sock)
+        return _Entry(client, host_key, via=jump_entry), False
 
     _start_reaper()
 
@@ -186,15 +233,22 @@ def acquire(host, user, key_path="", password="", port=22, timeout=30,
             if entry.alive():
                 entry.last_used = time.monotonic()
                 entry.uses += 1
+                if entry.via is not None:
+                    touch(entry.via)
                 return entry, True
             # The server was restarted, or something in between dropped us.
             _POOL.pop(key, None)
             entry.close()
         _evict_oldest_locked()
 
+    sock, jump_entry = (None, None)
+    if jump:
+        sock, jump_entry = _open_via(jump, host, port, timeout)
     client, host_key = _connect(host, port, user, key_path, password,
-                                timeout, verify_host_key)
-    entry = _Entry(client, host_key)
+                                timeout, verify_host_key, sock=sock)
+    if jump_entry is not None:
+        host_key["via"] = f"{jump['user']}@{jump['host']}"
+    entry = _Entry(client, host_key, via=jump_entry)
     entry.uses = 1
     with _POOL_LOCK:
         existing = _POOL.get(key)
@@ -223,17 +277,32 @@ def touch(entry) -> None:
 
 
 def close_all(host: str = "", user: str = "") -> int:
-    """Close pooled connections, optionally only those matching host and user."""
+    """Close pooled connections, optionally only those matching host and user.
+
+    Anything tunnelled through a connection being closed goes with it, so those
+    are dropped from the pool too rather than left behind as dead entries.
+    """
     closed = 0
     with _POOL_LOCK:
+        doomed = []
         for key, entry in list(_POOL.items()):
             if host and key[0] != host:
                 continue
             if user and key[2] != user:
                 continue
-            _POOL.pop(key, None)
-            entry.close()
-            closed += 1
+            doomed.append((key, entry))
+
+        doomed_ids = {id(entry) for _, entry in doomed}
+        for key, entry in list(_POOL.items()):
+            if entry.via is not None and id(entry.via) in doomed_ids:
+                if (key, entry) not in doomed:
+                    doomed.append((key, entry))
+
+        # Dependants first, so nothing keeps using a transport that is going away.
+        for key, entry in sorted(doomed, key=lambda pair: pair[1].via is None):
+            if _POOL.pop(key, None) is not None:
+                entry.close()
+                closed += 1
     return closed
 
 
@@ -247,6 +316,7 @@ def status() -> dict:
                 "user": key[2],
                 "credential": key[3],
                 "alive": entry.alive(),
+                "via": key[5][0] if key[5] else None,
                 "uses": entry.uses,
                 "idle_seconds": round(now - entry.last_used, 1),
                 "age_seconds": round(now - entry.created, 1),

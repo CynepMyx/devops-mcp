@@ -9,6 +9,11 @@
 - Idle connections close after `SSH_POOL_IDLE_TTL` seconds (default 300) via a background reaper, on shutdown, and whenever the transport turns out to be dead. New settings: `SSH_POOL`, `SSH_POOL_IDLE_TTL`, `SSH_POOL_MAX`, `SSH_POOL_KEEPALIVE`.
 - Responses carry `connection: reused | new`, so the audit log shows which calls paid for a handshake.
 
+### Added (ProxyJump)
+- `jump_host`, `jump_user`, `jump_key`, `jump_password`, `jump_port` on `ssh_exec`, `file_get` and `file_put`: reach a server through an intermediate one, the way `ssh -J` does. The jump host carries bytes only; authentication with the target happens end to end inside the tunnel, so the target's password never becomes an argument to a command running on the jump box.
+- This is what makes SFTP reach hosts behind a bastion at all. Running `ssh` or `sshpass` as a command on the intermediate server cannot carry `file_get` / `file_put`, so on those hosts config editing meant `printf | tee` through two shells.
+- Jump connections are pooled and shared between every target behind them, counted as their own entry, and reported as `via` in `ssh_sessions`. The reaper will not close a jump host while something is tunnelled through it, and closing one explicitly closes its dependants rather than leaving dead entries behind.
+
 ### Notes
 - Commands still run as separate channels: no working directory, environment or shell state carries between calls. A persistent shell would let two separately validated calls add up to one command neither of them was.
 - A connection that dies mid-flight is retried once, but only for a read. `file_put` is never replayed: if the transport dropped after the rename, a second pass would read the new content as the old one, report "nothing to write" about a config it had just replaced, and treat the replacement as the thing to restore. It now returns an error naming the stage it stopped at and where the previous content is. `ssh_exec` retries only commands that pass the read-only allowlist, since a second `apt install` is worse than an honest error.

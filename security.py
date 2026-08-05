@@ -183,6 +183,43 @@ def _is_subcommand_safe(cmd: str) -> bool:
     return False
 
 
+def parse_jump(args: dict, allow_password: bool) -> dict | None:
+    """Read jump_* parameters into the shape ssh_pool expects, or None.
+
+    A jump host only carries bytes: the connection to the target is negotiated
+    end to end inside the tunnel. That is the whole reason to prefer it over
+    running ssh or sshpass as a command on the intermediate box, where the
+    target's password ends up in the process list.
+    """
+    host = (args.get("jump_host") or "").strip()
+    if not host:
+        return None
+
+    user = (args.get("jump_user") or "").strip()
+    key_path = (args.get("jump_key") or "").strip()
+    password = (args.get("jump_password") or "").strip()
+
+    if not user:
+        raise ValueError("jump_host was given without jump_user")
+    if password and not allow_password:
+        raise PermissionError(
+            "Password authentication is disabled. Set ALLOW_SSH_PASSWORD=true to enable."
+        )
+    if not key_path and not password:
+        raise ValueError("jump_host needs jump_key or jump_password")
+    if key_path:
+        validate_ssh_key_path(key_path)
+
+    return {
+        "host": host,
+        "user": user,
+        "key": key_path,
+        "password": password,
+        "port": int(args.get("jump_port", 22)),
+        "verify_host_key": bool(args.get("verify_host_key", False)),
+    }
+
+
 def is_read_only_command(command: str) -> bool:
     """True when every sub-command is in the read-only allowlist.
 

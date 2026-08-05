@@ -76,6 +76,40 @@ def main():
 
     run(ssh_sessions({"action": "close"}))
 
+    # Reaching a host through a jump. Pointing the tunnel back at the jump host's
+    # own sshd (127.0.0.1 from its side) proves the channel end to end without
+    # needing a third machine.
+    jump = {"jump_host": HOST["host"], "jump_user": HOST["user"], "jump_key": HOST["key"]}
+    r = run(ssh_exec({"host": "127.0.0.1", "user": HOST["user"], "key": HOST["key"],
+                      "command": "hostname", **jump}))
+    print("\nthrough a jump:", r.get("stdout", "").strip() or r.get("error"),
+          "| connection:", r.get("connection"), "| via:", r.get("host_key", {}).get("via"))
+    if r.get("error"):
+        fails.append(f"jump connection failed: {r['error']}")
+    elif not r.get("host_key", {}).get("via"):
+        fails.append("a tunnelled connection should report which jump it went through")
+
+    r2 = run(ssh_exec({"host": "127.0.0.1", "user": HOST["user"], "key": HOST["key"],
+                       "command": "whoami", **jump}))
+    if r2.get("connection") != "reused":
+        fails.append("the tunnelled connection should be reused too")
+
+    r3 = run(file_get({"host": "127.0.0.1", "user": HOST["user"], "key": HOST["key"],
+                       "path": "/etc/hostname", **jump}))
+    print("file_get through a jump:", (r3.get("content") or r3.get("error", "")).strip())
+    if r3.get("error"):
+        fails.append(f"SFTP through a jump failed: {r3['error']}")
+
+    status = run(ssh_sessions({"action": "status"}))
+    print("connections:", [(c["host"], c["via"]) for c in status["connections"]])
+    if status["open"] != 2:
+        fails.append(f"expected the target and its jump, got {status['open']}")
+
+    closed = run(ssh_sessions({"action": "close", "host": HOST["host"]}))
+    print("closing the jump host closed:", closed["closed"], "remaining:", closed["remaining"])
+    if closed["remaining"] != 0:
+        fails.append("closing a jump host must take its tunnelled connections with it")
+
     print("\nFAILURES:" if fails else "\nALL CHECKS PASSED")
     for f in fails:
         print(" -", f)

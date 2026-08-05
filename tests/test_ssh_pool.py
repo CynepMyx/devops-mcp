@@ -45,7 +45,8 @@ def clean_pool(monkeypatch):
     ssh_pool.close_all()
     created = []
 
-    def fake_connect(host, port, user, key_path, password, timeout, verify_host_key):
+    def fake_connect(host, port, user, key_path, password, timeout, verify_host_key,
+                     sock=None):
         client = FakeClient()
         created.append(client)
         return client, {"mode": "warn", "known_hosts_loaded": False}
@@ -151,6 +152,77 @@ def test_reaper_leaves_a_busy_connection_alone(clean_pool, monkeypatch):
         entry.lock.release()
 
     assert ssh_pool._reap() == 1
+
+
+# --- going through a jump host --------------------------------------------
+
+JUMP = {"host": "203.0.113.9", "user": "oleg", "key": "/app/keys/vps.pem"}
+
+
+@pytest.fixture
+def fake_channels(monkeypatch):
+    """Let a pooled connection open channels, the way a jump host does."""
+    opened = []
+
+    def open_channel(self, kind, dest, src, timeout=None):
+        opened.append(dest)
+        return f"channel-to-{dest[0]}:{dest[1]}"
+
+    monkeypatch.setattr(FakeTransport, "open_channel", open_channel, raising=False)
+    return opened
+
+
+def test_a_jump_host_is_pooled_and_shared(clean_pool, fake_channels):
+    ssh_pool.acquire("10.0.0.1", "root", "/app/keys/a.pem", jump=JUMP)
+    ssh_pool.acquire("10.0.0.2", "root", "/app/keys/a.pem", jump=JUMP)
+
+    hosts = sorted(c["host"] for c in ssh_pool.status()["connections"])
+    assert hosts == ["10.0.0.1", "10.0.0.2", "203.0.113.9"]
+    assert len(fake_channels) == 2, "both targets tunnel through one jump connection"
+
+    jump_entry = [c for c in ssh_pool.status()["connections"]
+                  if c["host"] == JUMP["host"]][0]
+    assert jump_entry["uses"] == 2
+    assert jump_entry["via"] is None
+
+
+def test_the_same_target_through_a_jump_is_reused(clean_pool, fake_channels):
+    first, reused_first = ssh_pool.acquire("10.0.0.1", "root", "/app/keys/a.pem", jump=JUMP)
+    second, reused_second = ssh_pool.acquire("10.0.0.1", "root", "/app/keys/a.pem", jump=JUMP)
+
+    assert (reused_first, reused_second) == (False, True)
+    assert first is second
+    assert len(fake_channels) == 1
+
+
+def test_direct_and_jumped_connections_are_different_entries(clean_pool, fake_channels):
+    ssh_pool.acquire("10.0.0.1", "root", "/app/keys/a.pem")
+    ssh_pool.acquire("10.0.0.1", "root", "/app/keys/a.pem", jump=JUMP)
+
+    vias = sorted(str(c["via"]) for c in ssh_pool.status()["connections"]
+                  if c["host"] == "10.0.0.1")
+    assert vias == ["203.0.113.9", "None"]
+
+
+def test_reaper_keeps_a_jump_host_that_carries_someone(clean_pool, fake_channels, monkeypatch):
+    ssh_pool.acquire("10.0.0.1", "root", "/app/keys/a.pem", jump=JUMP)
+    monkeypatch.setattr(ssh_pool, "IDLE_TTL", 60)
+    for key, entry in list(ssh_pool._POOL.items()):
+        if key[0] == JUMP["host"]:
+            entry.last_used = time.monotonic() - 61  # looks idle, is not
+
+    ssh_pool._reap()
+    assert any(c["host"] == JUMP["host"] for c in ssh_pool.status()["connections"])
+
+
+def test_closing_a_jump_host_takes_its_dependants(clean_pool, fake_channels):
+    ssh_pool.acquire("10.0.0.1", "root", "/app/keys/a.pem", jump=JUMP)
+    ssh_pool.acquire("10.0.0.2", "root", "/app/keys/a.pem", jump=JUMP)
+
+    closed = ssh_pool.close_all(host=JUMP["host"])
+
+    assert closed == 3, "the tunnelled connections die with the jump host"
+    assert ssh_pool.status()["open"] == 0
 
 
 def test_status_reports_usage(clean_pool):

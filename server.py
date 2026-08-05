@@ -375,7 +375,9 @@ _TOOLS = [
             "All other commands require confirmed=true — always ask the user before setting it. "
             "Key must be located under /app/keys/. "
             "By default connects with warn policy (unknown hosts are allowed but reported). "
-            "Set verify_host_key=true to reject hosts not in /app/ssh/known_hosts."
+            "Set verify_host_key=true to reject hosts not in /app/ssh/known_hosts. "
+            "Pass jump_host/jump_user/jump_key to reach a server through an intermediate "
+            "one instead of running ssh or sshpass as a command on it."
         ),
         inputSchema={
             "type": "object",
@@ -387,6 +389,11 @@ _TOOLS = [
                 "command": {"type": "string", "description": "Command to execute (max 500 chars, no shell injection)"},
                 "timeout": {"type": "integer", "description": "Timeout in seconds (default 30, max 120)"},
                 "confirmed": {"type": "boolean", "description": "Set to true to allow commands outside the read-only allowlist, after explicit user approval"},
+                "jump_host": {"type": "string", "description": "Reach the target through this host (SSH ProxyJump). The jump host only carries the traffic; authentication with the target happens end to end inside the tunnel."},
+                "jump_user": {"type": "string", "description": "Username on the jump host"},
+                "jump_key": {"type": "string", "description": "Key for the jump host, e.g. /app/keys/vps.pem"},
+                "jump_password": {"type": "string", "description": "Password for the jump host (alternative to jump_key)"},
+                "jump_port": {"type": "integer", "description": "SSH port on the jump host (default 22)"},
                 "verify_host_key": {"type": "boolean", "description": "Reject unknown hosts not in /app/ssh/known_hosts (default: false)"},
             },
             "required": ["host", "user", "command"],
@@ -419,7 +426,7 @@ _TOOLS = [
             "Read a file from a remote server over SFTP. No shell involved, so content "
             "with quotes, semicolons or backticks comes back verbatim. Returns content, "
             "size, mode, owner and sha256. Credential files (shadow, sudoers, private "
-            "keys, authorized_keys) are refused."
+            "keys, authorized_keys) are refused. Works through jump_host as well."
         ),
         inputSchema={
             "type": "object",
@@ -431,6 +438,11 @@ _TOOLS = [
                 "path": {"type": "string", "description": "Absolute path of the file to read"},
                 "max_bytes": {"type": "integer", "description": "Read at most N bytes (default and max 524288)"},
                 "timeout": {"type": "integer", "description": "Timeout in seconds (default 30, max 120)"},
+                "jump_host": {"type": "string", "description": "Reach the target through this host (SSH ProxyJump). The jump host only carries the traffic; authentication with the target happens end to end inside the tunnel."},
+                "jump_user": {"type": "string", "description": "Username on the jump host"},
+                "jump_key": {"type": "string", "description": "Key for the jump host, e.g. /app/keys/vps.pem"},
+                "jump_password": {"type": "string", "description": "Password for the jump host (alternative to jump_key)"},
+                "jump_port": {"type": "integer", "description": "SSH port on the jump host (default 22)"},
                 "verify_host_key": {"type": "boolean", "description": "Reject unknown hosts (default: false)"},
             },
             "required": ["host", "user", "path"],
@@ -466,6 +478,11 @@ _TOOLS = [
                 "rollback_on_failure": {"type": "boolean", "description": "Restore the previous content if verify_cmd exits non-zero (default true)"},
                 "confirmed": {"type": "boolean", "description": "Required for the actual write. Set only after explicit user approval."},
                 "timeout": {"type": "integer", "description": "Timeout in seconds (default 30, max 120)"},
+                "jump_host": {"type": "string", "description": "Reach the target through this host (SSH ProxyJump). The jump host only carries the traffic; authentication with the target happens end to end inside the tunnel."},
+                "jump_user": {"type": "string", "description": "Username on the jump host"},
+                "jump_key": {"type": "string", "description": "Key for the jump host, e.g. /app/keys/vps.pem"},
+                "jump_password": {"type": "string", "description": "Password for the jump host (alternative to jump_key)"},
+                "jump_port": {"type": "integer", "description": "SSH port on the jump host (default 22)"},
                 "verify_host_key": {"type": "boolean", "description": "Reject unknown hosts (default: false)"},
             },
             "required": ["host", "user", "path", "content"],
