@@ -487,8 +487,14 @@ _SENSITIVE_KEYS = {"password", "passwd", "secret", "token"}
 _KEY_PATH_PREFIX = "/app/keys/"
 
 # file_put sends whole config files. Storing them verbatim would turn the audit
-# log into a config archive; the hash still proves what was written.
+# log into a config archive, so long values keep a readable head plus the length
+# and hash of the whole thing.
 _MAX_AUDIT_VALUE = 200
+
+# Fields the validator already bounds. ssh_exec is 72% of all calls and its
+# commands are capped at 500 chars; truncating those would trade a log that
+# lies for a log that cannot be read.
+_LENGTH_EXEMPT = {"command"}
 
 
 def _sanitize_value(name: str, value):
@@ -499,9 +505,11 @@ def _sanitize_value(name: str, value):
         if isinstance(value, str) and value.startswith(_KEY_PATH_PREFIX):
             return value
         return "***"
+    if lowered in _LENGTH_EXEMPT:
+        return value
     if isinstance(value, str) and len(value) > _MAX_AUDIT_VALUE:
         digest = hashlib.sha256(value.encode("utf-8", "replace")).hexdigest()[:12]
-        return f"<{len(value)} chars, sha256={digest}>"
+        return f"{value[:_MAX_AUDIT_VALUE]}... <{len(value)} chars, sha256={digest}>"
     return value
 
 

@@ -111,12 +111,20 @@ def test_key_field_holding_something_else_is_masked():
     assert server._sanitize_args({"key": "sk-live-abcdef"})["key"] == "***"
 
 
-def test_long_content_is_replaced_by_a_hash():
-    body = "x" * 5000
+def test_long_content_keeps_a_readable_head_and_a_hash():
+    body = "server {\n" + "x" * 5000
     value = server._sanitize_args({"content": body})["content"]
-    assert body not in value
-    assert "5000 chars" in value
+    assert value.startswith("server {"), "the head has to stay greppable"
+    assert len(value) < len(body), "the body itself must not be archived in the log"
+    assert "5009 chars" in value
     assert "sha256=" in value
+
+
+def test_ssh_command_is_never_truncated():
+    """The validator caps commands at 500 chars; that is short enough to keep whole."""
+    command = "sed -i '" + "s/a/b/;" * 40 + "' /etc/nginx/nginx.conf"
+    assert 200 < len(command) < 500
+    assert server._sanitize_args({"command": command})["command"] == command
 
 
 def test_audit_survives_an_unwritable_path(monkeypatch, tmp_path):

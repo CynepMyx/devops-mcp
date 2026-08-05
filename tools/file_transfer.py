@@ -32,14 +32,36 @@ MAX_DIFF_LINES = 200
 logger = logging.getLogger(__name__)
 
 
+class _CapturingWarningPolicy(paramiko.MissingHostKeyPolicy):
+    """Like WarningPolicy, but the warning reaches the caller instead of a log file."""
+
+    def __init__(self):
+        self.warnings = []
+
+    def missing_host_key(self, client, hostname, key):
+        self.warnings.append(
+            f"Unknown host key for {hostname} ({key.get_name()}). "
+            "Add it to /app/ssh/known_hosts for strict verification."
+        )
+
+
 def _connect(host: str, user: str, key_path: str, password: str, timeout: int,
-             verify_host_key: bool) -> paramiko.SSHClient:
+             verify_host_key: bool) -> tuple[paramiko.SSHClient, dict]:
     client = paramiko.SSHClient()
+    known_hosts_loaded = False
     if os.path.isfile(KNOWN_HOSTS_PATH):
         client.load_host_keys(KNOWN_HOSTS_PATH)
-    client.set_missing_host_key_policy(
-        paramiko.RejectPolicy() if verify_host_key else paramiko.WarningPolicy()
-    )
+        known_hosts_loaded = True
+
+    if verify_host_key:
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        policy = None
+        host_key = {"mode": "strict", "known_hosts_loaded": known_hosts_loaded}
+    else:
+        policy = _CapturingWarningPolicy()
+        client.set_missing_host_key_policy(policy)
+        host_key = {"mode": "warn", "known_hosts_loaded": known_hosts_loaded}
+
     sock = socket.create_connection((host, 22), timeout=timeout)
     sock.settimeout(timeout)
     connect_kwargs = dict(
@@ -55,7 +77,9 @@ def _connect(host: str, user: str, key_path: str, password: str, timeout: int,
         client.connect(**connect_kwargs)
     finally:
         connect_kwargs.pop("password", None)
-    return client
+    if policy and policy.warnings:
+        host_key["warnings"] = policy.warnings
+    return client, host_key
 
 
 def _common_args(args: dict) -> tuple:
@@ -112,7 +136,7 @@ def _decode(data: bytes) -> tuple[str | None, str | None]:
 
 def _get_sync(host, user, key_path, password, timeout, verify_host_key,
               path, max_bytes) -> dict:
-    client = _connect(host, user, key_path, password, timeout, verify_host_key)
+    client, host_key = _connect(host, user, key_path, password, timeout, verify_host_key)
     try:
         sftp = client.open_sftp()
         try:
@@ -127,7 +151,7 @@ def _get_sync(host, user, key_path, password, timeout, verify_host_key,
 
     result = {"host": host, "path": path, **_describe(st),
               "sha256": hashlib.sha256(data).hexdigest(),
-              "truncated": truncated}
+              "truncated": truncated, "host_key": host_key}
     text, why_not = _decode(data)
     if text is None:
         result["content"] = None
@@ -144,7 +168,7 @@ def _backup_name(path: str) -> str:
 
 def _put_sync(host, user, key_path, password, timeout, verify_host_key,
               path, payload: bytes, mode, backup, dry_run) -> dict:
-    client = _connect(host, user, key_path, password, timeout, verify_host_key)
+    client, host_key = _connect(host, user, key_path, password, timeout, verify_host_key)
     warnings: list[str] = []
     try:
         sftp = client.open_sftp()
@@ -198,6 +222,7 @@ def _put_sync(host, user, key_path, password, timeout, verify_host_key,
             summary = {
                 "host": host,
                 "path": path,
+                "host_key": host_key,
                 "exists": exists,
                 "old_sha256": hashlib.sha256(old_bytes).hexdigest() if exists else None,
                 "new_sha256": hashlib.sha256(payload).hexdigest(),
