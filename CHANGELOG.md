@@ -10,6 +10,7 @@
 - `file_get` and `file_put` — read and write remote files over SFTP. No shell is involved, so there is no 500 character ceiling and no quoting to fight: semicolons in an nginx directive, backticks and `$(...)` in a script, HTML in an alert body all travel verbatim. `file_put` returns a unified diff, saves `path.bak_<timestamp>`, preserves mode and owner, and writes through a temporary file in the same directory. `dry_run=true` shows the diff without touching anything; the write itself needs `confirmed=true`.
 - Credential files (`shadow`, `gshadow`, `sudoers`, `authorized_keys`, private keys) are refused by both file tools.
 - `ToolAnnotations` on all 19 tools (`readOnlyHint`, `destructiveHint`), so a client can gate destructive calls by protocol instead of trusting the model to read a description.
+- Streamable HTTP transport on `/mcp`, stateless. Restarting the container used to leave the client holding a dead SSE session that answered `-32602` to every call until a manual reconnect. `/sse` stays mounted, so nothing has to move today.
 - Ruff (`E9,F`) in CI. The duplicate definition above is exactly what F811 catches.
 - Tests: `tests/test_audit.py` drives `call_tool` and reads the log file back, `tests/test_file_transfer.py` covers the path rules and the pre-connection refusals. 190 tests total.
 

@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Request
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.types import TextContent, Tool, ToolAnnotations
 import uvicorn
 
@@ -125,12 +126,19 @@ def _start_watcher() -> None:
 @asynccontextmanager
 async def lifespan(_app):
     _start_watcher()
-    yield
+    async with session_manager.run():
+        yield
 
 
 app = FastAPI(title="DevOps MCP Server", docs_url=None, redoc_url=None, lifespan=lifespan)
 mcp_server = Server("devops-mcp")
 transport = SseServerTransport("/messages/")
+
+# Streamable HTTP on /mcp, stateless: each request carries everything it needs,
+# so restarting the container no longer leaves the client holding a dead session
+# id and answering -32602 to every call. SSE stays mounted on /sse for clients
+# that still speak it.
+session_manager = StreamableHTTPSessionManager(app=mcp_server, stateless=True)
 
 # Annotations tell the client what a tool does before it runs, so "ask the user
 # first" stops depending on the model reading a description and deciding to care.
@@ -570,7 +578,9 @@ async def health():
 
 
 async def _asgi_handler(scope, receive, send):
-    if (scope["type"] == "http"
+    if scope["type"] == "http" and scope.get("path", "").rstrip("/") == "/mcp":
+        await session_manager.handle_request(scope, receive, send)
+    elif (scope["type"] == "http"
             and scope.get("path", "").startswith("/messages/")
             and scope.get("method") == "POST"):
         await transport.handle_post_message(scope, receive, send)

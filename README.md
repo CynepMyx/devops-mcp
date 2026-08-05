@@ -83,7 +83,8 @@ PROTECTED_CONTAINERS=devops-mcp   # comma-separated, cannot be stopped/restarted
 docker compose up -d
 ```
 
-The MCP server starts on `127.0.0.1:8765` (SSE transport).
+The MCP server starts on `127.0.0.1:8765`, serving streamable HTTP on `/mcp` and
+legacy SSE on `/sse`.
 
 ### 3. Connect to Claude Code
 
@@ -93,11 +94,19 @@ Add to `~/.claude.json` (or your Claude Desktop config):
 {
   "mcpServers": {
     "devops": {
-      "type": "sse",
-      "url": "http://YOUR_SERVER:8765/sse"
+      "type": "http",
+      "url": "http://YOUR_SERVER:8765/mcp"
     }
   }
 }
+```
+
+`/mcp` runs stateless: every request carries what it needs, so restarting the
+container does not leave the client holding a dead session and answering
+`-32602` to every call. The older SSE transport is still mounted:
+
+```json
+{ "type": "sse", "url": "http://YOUR_SERVER:8765/sse" }
 ```
 
 For remote servers, use an SSH tunnel:
