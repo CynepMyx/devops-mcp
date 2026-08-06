@@ -1,5 +1,24 @@
+import os
 import re
 from pathlib import Path, PurePosixPath
+
+KNOWN_HOSTS_PATH = os.environ.get("SSH_KNOWN_HOSTS", "/app/ssh/known_hosts")
+
+
+def strict_host_key_default() -> bool:
+    """Strict host key checking is on once there is something to check against.
+
+    Defaulting to strict with an empty known_hosts would reject every host on a
+    fresh install, so the file's existence is the switch. Set
+    SSH_STRICT_HOST_KEY=false to force the old warn behaviour.
+    """
+    override = os.environ.get("SSH_STRICT_HOST_KEY")
+    if override is not None:
+        return override.lower() == "true"
+    try:
+        return os.path.getsize(KNOWN_HOSTS_PATH) > 0
+    except OSError:
+        return False
 
 NGINX_CONTAINER_ALLOWLIST = frozenset([
     "nginx",
@@ -183,7 +202,7 @@ def _is_subcommand_safe(cmd: str) -> bool:
     return False
 
 
-def parse_jump(args: dict, allow_password: bool) -> dict | None:
+def parse_jump(args: dict, allow_password: bool, strict_default: bool = False) -> dict | None:
     """Read jump_* parameters into the shape ssh_pool expects, or None.
 
     A jump host only carries bytes: the connection to the target is negotiated
@@ -216,7 +235,7 @@ def parse_jump(args: dict, allow_password: bool) -> dict | None:
         "key": key_path,
         "password": password,
         "port": int(args.get("jump_port", 22)),
-        "verify_host_key": bool(args.get("verify_host_key", False)),
+        "verify_host_key": bool(args.get("verify_host_key", strict_default)),
     }
 
 

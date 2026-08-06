@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.1] - 2026-08-06
+
+### Changed
+- Host key checking is strict by default once `known_hosts` has anything in it, and stays in warn mode while the file is empty. Before, strict mode existed but had to be asked for per call, so in practice every connection reported "unknown host key" and everyone learned to scroll past it. `SSH_STRICT_HOST_KEY` overrides the default in either direction; `verify_host_key` still wins per call.
+- README documents reading host keys off the machine itself rather than with `ssh-keyscan`, which trusts whoever answers on the port — the thing host key checking is there to catch.
+
 ## [0.5.0] - 2026-08-06
 
 ### Added

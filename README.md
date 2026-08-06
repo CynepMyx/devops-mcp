@@ -139,18 +139,26 @@ ssh_exec(host="10.0.0.5", user="deploy", key="/app/keys/my-server.pem", command=
 
 ## SSH Host Key Verification
 
-By default,  connects with **warn mode**: unknown hosts are allowed but a warning appears in the response. This is convenient but not strict.
+Strict checking turns itself on as soon as there is something to check against: if
+`/app/ssh/known_hosts` is non-empty, unknown hosts are rejected. While the file is empty
+— a fresh install — connections run in warn mode instead, since rejecting every host
+would only teach you to ignore the warning. `SSH_STRICT_HOST_KEY=false` forces warn mode
+back, and `verify_host_key` on a single call overrides either way.
 
-To enable **strict mode**, populate :
+Getting the keys in there is the part worth doing carefully:
 
 ```bash
-# On your host machine, scan the target server and append to known_hosts
-ssh-keyscan -H 10.0.0.5 >> /opt/devops-mcp/ssh/known_hosts
+# On the server itself, over an access you already trust
+cat /etc/ssh/ssh_host_ed25519_key.pub
+# then add "10.0.0.5 ssh-ed25519 AAAA..." to /opt/devops-mcp/ssh/known_hosts
 ```
 
-Then pass  in . Hosts not in  will be rejected.
+`ssh-keyscan` is the convenient way and the weaker one: it trusts whoever answers on the
+port, which is exactly what host key checking exists to catch. Read the key from the
+machine through access you already have, or from the provider's console.
 
-> The  file is mounted read-only into the container and gitignored — it never ends up in source control.
+> The `known_hosts` file is mounted read-only into the container and gitignored — it
+> never ends up in source control.
 
 ---
 
@@ -292,6 +300,7 @@ Docker SDK  Paramiko  psutil/dbus  httpx      Prometheus
 | `EXA_API_KEY` | — | Exa key for `search_ai` |
 | `PROMETHEUS_URL` | `http://host.docker.internal:9090` | Prometheus endpoint |
 | `ALLOW_SSH_PASSWORD` | `false` | Enable SSH password auth (key-based is default) |
+| `SSH_STRICT_HOST_KEY` | auto | Reject unknown host keys. Defaults to on when `known_hosts` is non-empty, off when it is empty |
 | `SSH_POOL` | `true` | Keep SSH connections open between calls; `false` reconnects every time |
 | `SSH_POOL_IDLE_TTL` | `300` | Close a pooled connection after this many idle seconds |
 | `SSH_POOL_MAX` | `20` | Maximum pooled connections before the least recently used one is dropped |

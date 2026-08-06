@@ -24,6 +24,7 @@ import paramiko
 from security import (
     MAX_FILE_BYTES,
     parse_jump,
+    strict_host_key_default,
     validate_remote_file_path,
     validate_ssh_key_path,
     validate_verify_command,
@@ -84,7 +85,8 @@ def _common_args(args: dict) -> tuple:
     key_path = args.get("key", "").strip()
     password = args.get("password", "").strip()
     timeout = min(int(args.get("timeout", 30)), 120)
-    verify_host_key = bool(args.get("verify_host_key", False))
+    strict = strict_host_key_default()
+    verify_host_key = bool(args.get("verify_host_key", strict))
 
     if not host:
         raise ValueError("Parameter 'host' is required")
@@ -98,7 +100,7 @@ def _common_args(args: dict) -> tuple:
         raise ValueError("Parameter 'key' or 'password' is required")
     if key_path:
         validate_ssh_key_path(key_path)
-    jump = parse_jump(args, ALLOW_SSH_PASSWORD)
+    jump = parse_jump(args, ALLOW_SSH_PASSWORD, strict)
     return host, user, key_path, password, timeout, verify_host_key, jump
 
 

@@ -144,6 +144,56 @@ def test_bad_verify_cmd_is_refused_before_connecting():
     assert "verify_cmd" in result["error"]
 
 
+# --- when strict host key checking turns itself on ------------------------
+
+def test_strict_is_off_without_a_known_hosts_file(monkeypatch, tmp_path):
+    """A fresh install has nothing to check against; rejecting everything is useless."""
+    import security
+
+    monkeypatch.delenv("SSH_STRICT_HOST_KEY", raising=False)
+    monkeypatch.setattr(security, "KNOWN_HOSTS_PATH", str(tmp_path / "missing"))
+    assert security.strict_host_key_default() is False
+
+
+def test_strict_turns_on_once_there_are_keys(monkeypatch, tmp_path):
+    import security
+
+    known = tmp_path / "known_hosts"
+    known.write_text("10.0.0.1 ssh-ed25519 AAAA\n", encoding="utf-8")
+    monkeypatch.delenv("SSH_STRICT_HOST_KEY", raising=False)
+    monkeypatch.setattr(security, "KNOWN_HOSTS_PATH", str(known))
+    assert security.strict_host_key_default() is True
+
+
+def test_an_empty_known_hosts_file_does_not_count(monkeypatch, tmp_path):
+    import security
+
+    known = tmp_path / "known_hosts"
+    known.write_text("", encoding="utf-8")
+    monkeypatch.delenv("SSH_STRICT_HOST_KEY", raising=False)
+    monkeypatch.setattr(security, "KNOWN_HOSTS_PATH", str(known))
+    assert security.strict_host_key_default() is False
+
+
+@pytest.mark.parametrize("value,expected", [("false", False), ("true", True)])
+def test_env_override_wins(monkeypatch, tmp_path, value, expected):
+    import security
+
+    known = tmp_path / "known_hosts"
+    known.write_text("10.0.0.1 ssh-ed25519 AAAA\n", encoding="utf-8")
+    monkeypatch.setattr(security, "KNOWN_HOSTS_PATH", str(known))
+    monkeypatch.setenv("SSH_STRICT_HOST_KEY", value)
+    assert security.strict_host_key_default() is expected
+
+
+def test_the_jump_host_inherits_the_strict_default():
+    from security import parse_jump
+
+    jump = parse_jump({"jump_host": "10.0.0.9", "jump_user": "ops",
+                       "jump_key": "/app/keys/a.pem"}, True, strict_default=True)
+    assert jump["verify_host_key"] is True
+
+
 # --- a dropped connection must not replay the write -----------------------
 
 class _FakeStat:

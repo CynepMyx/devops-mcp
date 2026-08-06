@@ -8,6 +8,7 @@ import paramiko
 from security import (
     is_read_only_command,
     parse_jump,
+    strict_host_key_default,
     validate_ssh_command,
     validate_ssh_key_path,
 )
@@ -85,7 +86,8 @@ async def ssh_exec(args: dict) -> dict:
     command = args.get("command", "").strip()
     timeout = min(int(args.get("timeout", 30)), 120)
     confirmed = bool(args.get("confirmed", False))
-    verify_host_key = bool(args.get("verify_host_key", False))
+    strict = strict_host_key_default()
+    verify_host_key = bool(args.get("verify_host_key", strict))
 
     # "refused" marks a rejection by our own rules, so the audit log can tell it
     # apart from a server that was unreachable or an authentication failure.
@@ -105,7 +107,7 @@ async def ssh_exec(args: dict) -> dict:
         if key_path:
             validate_ssh_key_path(key_path)
         validate_ssh_command(command, confirmed)
-        jump = parse_jump(args, ALLOW_SSH_PASSWORD)
+        jump = parse_jump(args, ALLOW_SSH_PASSWORD, strict)
     except (ValueError, PermissionError) as e:
         return {"error": str(e), "outcome": "refused"}
 
