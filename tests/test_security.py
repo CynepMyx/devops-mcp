@@ -156,6 +156,87 @@ class TestSshCommandAlwaysBlocked:
             validate_ssh_command(cmd, confirmed=False)
 
 
+class TestRedirectionsThatDoNotWrite:
+    """Merging descriptors and discarding output are not writes to a file.
+
+    Every command here was refused in real use, which is how '| wc -c' ended up
+    in our own house rules as the way to silence output.
+    """
+
+    @pytest.mark.parametrize("cmd", [
+        "docker logs nginx 2>&1 | grep error",
+        "find /var/log -maxdepth 2 -name '*.log' 2>/dev/null",
+        "cat /etc/hostname 2>&1",
+        "ls /nonexistent 2>/dev/null",
+        "ping -c1 example.com >/dev/null",
+        "grep -r pattern /etc 2> /dev/null",
+        "curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/",
+    ])
+    def test_harmless_redirects_pass(self, cmd):
+        validate_ssh_command(cmd, confirmed=False)
+
+    @pytest.mark.parametrize("cmd", [
+        "cat /etc/passwd > /tmp/stolen",
+        "echo test >> /etc/hosts",
+        "docker logs nginx 2>/tmp/captured",
+        "ls 2>&1 > /tmp/out",
+        "curl -s http://x/ -o /tmp/payload",
+    ])
+    def test_writes_still_blocked(self, cmd):
+        with pytest.raises((ValueError, PermissionError)):
+            validate_ssh_command(cmd, confirmed=False)
+
+
+class TestReadOnlyToolsPassFreely:
+    """Inspection commands that used to demand confirmation for no reason.
+
+    Requiring confirmed=true on 'nproc' or 'git status' does not make anything
+    safer; it trains whoever approves them to stop reading what they approve.
+    """
+
+    @pytest.mark.parametrize("cmd", [
+        "nproc",
+        "lscpu",
+        "command -v docker",
+        "readlink -f /etc/nginx/nginx.conf",
+        "sha256sum /etc/nginx/nginx.conf",
+        "pgrep -a nginx",
+        "getent hosts example.com",
+        "dpkg-query -l nginx",
+        "apt-cache policy nginx",
+        "dpkg -l",
+        "timedatectl",
+        "git log --oneline -5",
+        "git status -sb",
+        "git diff --stat",
+        "git branch -a",
+        "git for-each-ref --format='%(refname)'",
+        "git config --get user.email",
+        "git stash list",
+        "apt list --installed",
+        "systemctl cat nginx",
+        "systemctl list-timers",
+    ])
+    def test_reading_needs_no_confirmation(self, cmd):
+        validate_ssh_command(cmd, confirmed=False)
+
+    @pytest.mark.parametrize("cmd", [
+        "dpkg -i /tmp/package.deb",
+        "dpkg --purge nginx",
+        "timedatectl set-timezone UTC",
+        "git push origin main",
+        "git reset --hard HEAD~1",
+        "git checkout main",
+        "git clean -fd",
+        "git config user.email attacker@example.com",
+        "git stash",
+        "apt install nginx",
+    ])
+    def test_mutating_forms_still_need_confirmation(self, cmd):
+        with pytest.raises((ValueError, PermissionError)):
+            validate_ssh_command(cmd, confirmed=False)
+
+
 class TestSshCommandLengthLimit:
     def test_too_long(self):
         with pytest.raises(ValueError, match="500"):
