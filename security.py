@@ -84,6 +84,9 @@ _SAFE_SINGLE = frozenset({
     "dpkg-query", "apt-cache", "getent", "locale", "getconf",
     # Answering "is this installed at all"
     "command", "hash",
+    # Changing directory decides nothing on its own: 'cd /etc && cat hosts' is
+    # still just a read, and 'cd /etc && rm -rf x' is still judged by the rm.
+    "cd", "pushd", "popd",
 })
 
 # Tokens/substrings that make otherwise-safe commands mutating.
@@ -209,12 +212,45 @@ def validate_ssh_key_path(path: str) -> None:
         raise PermissionError(f"Invalid characters in key filename: {filename}")
 
 
+# git takes its global options before the subcommand, so 'git -C /srv/app log'
+# has '-C' where the allowlist expects 'log'. These are stripped first, which
+# is safe because none of them decide what the command does: -C and --git-dir
+# only say which repository, -c sets a config value for this run only. What the
+# command does is still the subcommand, and that is what gets checked.
+_GIT_GLOBAL_WITH_VALUE = frozenset({
+    "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path",
+})
+_GIT_GLOBAL_FLAGS = frozenset({
+    "--no-pager", "-P", "--paginate", "--bare", "--no-replace-objects",
+    "--literal-pathspecs", "--no-optional-locks",
+})
+
+
+def _strip_git_globals(tokens: list[str]) -> list[str]:
+    """Drop git's global options so the subcommand lands where checks look for it."""
+    i = 1
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in _GIT_GLOBAL_WITH_VALUE:
+            i += 2  # the option and its value
+        elif tok in _GIT_GLOBAL_FLAGS or any(
+            tok.startswith(opt + "=") for opt in _GIT_GLOBAL_WITH_VALUE
+        ):
+            i += 1
+        else:
+            break
+    return tokens[:1] + tokens[i:]
+
+
 def _is_subcommand_safe(cmd: str) -> bool:
     """Return True if a single shell command (no operators) is read-only safe."""
     tokens = cmd.strip().split()
     if not tokens:
         return True
     first = tokens[0].lower()
+
+    if first == "git":
+        tokens = _strip_git_globals(tokens)
 
     # Longest prefix wins: three words before two, so that 'docker network ls'
     # can be allowed while 'docker network rm' still falls through to confirmation.

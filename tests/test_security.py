@@ -237,6 +237,59 @@ class TestReadOnlyToolsPassFreely:
             validate_ssh_command(cmd, confirmed=False)
 
 
+class TestGitGlobalOptions:
+    """git puts its global options before the subcommand.
+
+    'git -C /srv/app log' is the same read as 'git log', but the allowlist used
+    to look at '-C' and see nothing it recognised.
+    """
+
+    @pytest.mark.parametrize("cmd", [
+        "git -C /opt/devops-mcp log --oneline -1",
+        "git -C /opt/devops-mcp status -sb",
+        "git --git-dir=/srv/app/.git status",
+        "git --git-dir /srv/app/.git log",
+        "git --no-pager diff --stat",
+        "git -c core.pager=cat log -5",
+        "git -C /srv/app --no-pager show HEAD",
+        "cd /opt/devops-mcp && git log --oneline -1",
+    ])
+    def test_reading_through_global_options(self, cmd):
+        validate_ssh_command(cmd, confirmed=False)
+
+    @pytest.mark.parametrize("cmd", [
+        "git -C /srv/app push origin main",
+        "git --git-dir=/srv/app/.git reset --hard HEAD~1",
+        "git -c user.email=x@y.z commit -am wip",
+        "git --no-pager clean -fd",
+        "cd /srv/app && rm -rf node_modules",
+    ])
+    def test_mutating_through_global_options(self, cmd):
+        with pytest.raises((ValueError, PermissionError)):
+            validate_ssh_command(cmd, confirmed=False)
+
+
+class TestChangeDirectory:
+    """cd decides nothing on its own; what follows it does."""
+
+    @pytest.mark.parametrize("cmd", [
+        "cd /etc && cat hostname",
+        "cd /var/log && ls -la",
+        "cd /opt/app && docker compose ps",
+    ])
+    def test_cd_then_read(self, cmd):
+        validate_ssh_command(cmd, confirmed=False)
+
+    @pytest.mark.parametrize("cmd", [
+        "cd /etc && rm -rf nginx",
+        "cd /opt/app && docker compose up -d",
+        "cd /tmp && apt install nginx",
+    ])
+    def test_cd_then_mutate(self, cmd):
+        with pytest.raises((ValueError, PermissionError)):
+            validate_ssh_command(cmd, confirmed=False)
+
+
 class TestSshCommandLengthLimit:
     def test_too_long(self):
         with pytest.raises(ValueError, match="500"):
