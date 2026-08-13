@@ -73,6 +73,17 @@ _SAFE_SINGLE = frozenset({
     "printenv", "which", "whereis", "type",
     # Misc safe
     "echo", "true", "false",
+    # Hardware and capabilities
+    "nproc", "arch", "lscpu", "lsmem", "lsusb", "lspci",
+    # Path and text helpers that only read what they are given
+    "basename", "dirname", "readlink", "realpath", "nl", "rev", "column",
+    "md5sum", "sha1sum", "sha256sum", "cksum", "cmp", "diff",
+    # Process lookup
+    "pgrep", "pidof",
+    # Package and locale queries with no mutating form
+    "dpkg-query", "apt-cache", "getent", "locale", "getconf",
+    # Answering "is this installed at all"
+    "command", "hash",
 })
 
 # Tokens/substrings that make otherwise-safe commands mutating.
@@ -91,10 +102,22 @@ _MUTATING_TOKENS: dict[str, tuple[str, ...]] = {
     "ip": ("set ", "del ", "add ", "flush", "change ", "replace ", "append "),
     # Reading journals is fine; these flags delete them.
     "journalctl": ("--rotate", "--vacuum", "--flush", "--sync", "--relinquish-var"),
+    # dpkg -l lists what is installed, dpkg -i installs it. Same binary,
+    # opposite consequences, so the flag decides.
+    "dpkg": ("-i", "--install", "-r", "--remove", "-p ", "--purge",
+             "--unpack", "--configure", "--force"),
+    # Reading the clock and timezone is fine; setting either is not.
+    "timedatectl": ("set-",),
 }
 
 # Commands allowed only when no mutating token is present.
 _CONDITIONALLY_SAFE = frozenset(_MUTATING_TOKENS.keys())
+
+# Writing to /dev/null is not writing. 'curl -o /dev/null -w %{http_code}' is
+# how you read a status code and nothing else, and 'wget -O /dev/null' is how
+# you measure throughput. These are cut out of the command before the mutating
+# tokens above are looked for, so '-o /tmp/loot' still requires confirmation.
+_DEVNULL_SINK_RE = re.compile(r'(?:-o|--output|-O|--output-document)[=\s]+/dev/null\b')
 
 # Two-word prefixes for commands whose safety depends on the subcommand.
 # Only the listed subcommands are allowed without confirmation.
@@ -109,6 +132,18 @@ _SAFE_TWO_WORD = frozenset({
     "docker version", "docker info",
     # NOTE: bare "docker network" is deliberately absent — it would also cover
     # 'docker network rm' and 'docker network prune'. See _SAFE_THREE_WORD.
+    # git — inspection only. push, pull, fetch, reset, clean, checkout, commit
+    # and gc are deliberately absent: they rewrite the working tree, the
+    # history or the remote.
+    "git log", "git status", "git show", "git diff", "git branch",
+    "git tag", "git remote", "git describe", "git blame", "git shortlog",
+    "git rev-parse", "git ls-files", "git ls-remote", "git cat-file",
+    "git for-each-ref", "git reflog", "git count-objects",
+    # apt queries that never touch the package database
+    "apt list", "apt show", "apt policy", "apt search",
+    # systemd inspection beyond plain status
+    "systemctl cat", "systemctl list-timers", "systemctl list-sockets",
+    "systemctl list-unit-files", "systemctl get-default",
 })
 
 # Three-word prefixes, for subcommands whose parent is too broad to allow wholesale.
@@ -118,6 +153,10 @@ _SAFE_THREE_WORD = frozenset({
     "docker image ls", "docker image inspect",
     "docker container ls", "docker container inspect",
     "docker compose ps", "docker compose config",
+    # 'git config key value' writes to the config file, so only reads pass here.
+    "git config --get", "git config --list", "git config -l",
+    # 'git stash' on its own stashes the working tree; listing does not.
+    "git stash list",
 })
 
 # Always-blocked patterns regardless of confirmed (command injection / redirects).
@@ -195,7 +234,7 @@ def _is_subcommand_safe(cmd: str) -> bool:
 
     # Conditionally safe: allowed only when no mutating tokens appear in the full cmd
     if first in _CONDITIONALLY_SAFE:
-        cmd_lower = cmd.lower()
+        cmd_lower = _DEVNULL_SINK_RE.sub(' ', cmd.lower())
         mutating = _MUTATING_TOKENS[first]
         return not any(tok in cmd_lower for tok in mutating)
 
@@ -312,6 +351,33 @@ def _mask_quotes(command: str) -> tuple[str, bool]:
     return ''.join(out), has_substitution
 
 
+# Redirections that neither create nor truncate anything: merging one descriptor
+# into another (2>&1, 1>&2) and discarding output (>/dev/null, 2>/dev/null,
+# &>/dev/null). Anything else that redirects is treated as a write to a file.
+_HARMLESS_REDIRECT_RE = re.compile(r'(?:\d*|&)>{1,2}\s*(?:&\s*\d+|/dev/null)')
+
+
+def _blank_harmless_redirects(mask: str) -> str:
+    """Blank out redirections that neither write nor start a new command.
+
+    Replaces each match with spaces of the same length, so positions in the
+    mask still line up with the original command and callers can keep slicing
+    by them. This also takes the '&' in '2>&1' out of the way of the operator
+    scanner, which would otherwise read it as "background this and run '1'".
+    """
+    return _HARMLESS_REDIRECT_RE.sub(lambda m: ' ' * len(m.group(0)), mask)
+
+
+def _writes_to_file(mask: str) -> bool:
+    """True when the command redirects output into a file.
+
+    The harmless forms are blanked out first, so whatever redirect is left has
+    a real target. Takes the quote mask, so an angle bracket inside quoted data
+    was already replaced and cannot reach here.
+    """
+    return bool(re.search(r'>{1,2}\s*\S', _blank_harmless_redirects(mask)))
+
+
 # Command separators. Order matters: || and && must match before the single-char
 # class, otherwise '&&' would be split as two '&'. A bare '&' backgrounds the left
 # side and runs the rest, and a newline separates commands just like ';' — both
@@ -324,8 +390,11 @@ def _split_shell_commands(command: str) -> list[str]:
 
     Operators are located in the masked copy, so a semicolon inside an nginx
     config snippet or a pipe inside a grep pattern no longer splits anything.
+    Harmless redirects are blanked out first for the same reason: the '&' in
+    '2>&1' is part of a redirect, not a command separator.
     """
     mask, _ = _mask_quotes(command)
+    mask = _blank_harmless_redirects(mask)
     parts: list[str] = []
     start = 0
     for m in _OPERATOR_RE.finditer(mask):
@@ -347,9 +416,11 @@ def validate_ssh_command(command: str, confirmed: bool) -> None:
         raise ValueError("Shell injection pattern detected: command substitution")
 
     # Block output redirection, but only outside quotes: '<b>' in an alert body
-    # or a ';' in an nginx directive are data, not syntax.
-    if re.search(r'>{1,2}\s*\S', mask):
-        raise ValueError("Output redirection is not allowed")
+    # or a ';' in an nginx directive are data, not syntax. Merging descriptors
+    # and discarding output stay allowed: neither creates nor truncates a file,
+    # and banning them only taught us to write '| wc -c' instead of '2>/dev/null'.
+    if _writes_to_file(mask):
+        raise ValueError("Output redirection to a file is not allowed")
 
     # Read-only allowlist check: every sub-command must be safe or confirmed required
     sub_commands = _split_shell_commands(command)
