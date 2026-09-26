@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import socket
 import time
 
 import paramiko
@@ -45,14 +46,30 @@ def _run_ssh(
             host, user, key_path, password or "", timeout=timeout,
             verify_host_key=verify_host_key, jump=jump,
         )
+        stdout = None
         try:
             with entry.lock:
                 stdin, stdout, stderr = entry.client.exec_command(command, timeout=timeout)
+                # Nothing is ever written to the command. Close its input now, so a
+                # command that reads stdin ('grep' without a file, 'cat', 'read')
+                # gets EOF instead of waiting out the timeout.
+                stdin.channel.shutdown_write()
                 out = stdout.read().decode(errors="replace")
                 err = stderr.read().decode(errors="replace")
                 exit_code = stdout.channel.recv_exit_status()
                 ssh_pool.touch(entry)
             break
+        except socket.timeout:
+            # socket.timeout is an OSError, so without this branch a slow command
+            # looked like a dead transport: the healthy connection was dropped and
+            # a read was run a second time. Close only this command's channel.
+            if stdout is not None:
+                stdout.channel.close()
+            ssh_pool.touch(entry)
+            raise paramiko.SSHException(
+                f"Command timed out after {timeout}s on {host}; it may still be "
+                f"running there."
+            )
         except (paramiko.SSHException, EOFError, OSError) as exc:
             ssh_pool.drop(entry)
             if not reused or attempt == 2:

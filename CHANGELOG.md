@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.2] - 2026-09-27
+
+### Fixed
+- `ssh_exec` closes the command's stdin right after starting it. A command that reads its input (`grep` without a file, `cat`, `read`) used to wait for input nobody would send and ran into the timeout.
+- A timeout is reported as a timeout. `socket.timeout` is an `OSError`, so it went down the dead-connection branch: a healthy pooled connection was thrown away, the error said "Connection dropped", and a read-only command was run a second time. Now only that command's channel is closed, the connection stays in the pool, and nothing is repeated.
+- The HTTP server keeps idle connections for 300 seconds instead of uvicorn's default 5. A client request sent into a connection the server had just closed came back as `ECONNRESET`.
+
 ## [0.5.1] - 2026-08-06
 
 ### Changed
