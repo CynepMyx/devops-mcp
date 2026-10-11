@@ -1,4 +1,5 @@
 import os
+import fnmatch
 import re
 from pathlib import Path, PurePosixPath
 
@@ -542,6 +543,54 @@ def _find_reason(args: list[str], raw_args: list[str]) -> str | None:
     return None
 
 
+_DANGEROUS_NAMES = ("find", "pkill", "pgrep", "rm")
+_WRAPPER_WORDS = frozenset({"sudo", "nice", "nohup", "time", "env", "command", "exec", "timeout", "ionice", "stdbuf"})
+_BRACE_RE = re.compile(r"^(.*?)\{([^{}]*)\}(.*)$")
+_VAR_DEFAULT_RE = re.compile(r"\$\{[^}]*?[:]?[-=+?]([^}]*)\}")
+
+
+def _brace_variants(token: str) -> list[str]:
+    """fi{n,}d -> ['find', 'fid'] (one level is enough: the shell's result is still a word)."""
+    m = _BRACE_RE.match(token)
+    if not m:
+        return [token]
+    pre, body, post = m.groups()
+    out = []
+    for alt in body.split(","):
+        out.extend(_brace_variants(pre + alt + post))
+    return out
+
+
+def _command_name_variants(token: str) -> set[str]:
+    """Spellings the shell could resolve to the same program name: quotes, $'..', \\, braces, ${x:-word}."""
+    base = token.replace("\\", "")
+    names = set()
+    for m in _VAR_DEFAULT_RE.finditer(base):
+        names.add(m.group(1).strip("\"'").rsplit("/", 1)[-1])
+    variants = [base] if "${" in base else _brace_variants(base)
+    for v in variants:
+        v = v.replace("$'", "").replace("'", "").replace('"', "")
+        names.add(v.rsplit("/", 1)[-1])
+    return {n for n in names if n}
+
+
+def _resolve_command_word(sub_command: str) -> str | None:
+    """If the first word (after wrappers) is a disguised dangerous name, return the plain name."""
+    tokens = sub_command.split()
+    i = 0
+    while i < len(tokens) and tokens[i].replace("\\", "").strip("\"'").lower() in _WRAPPER_WORDS:
+        i += 1
+        while i < len(tokens) and (tokens[i].startswith("-") or "=" in tokens[i] or tokens[i].isdigit()):
+            i += 1
+    if i >= len(tokens):
+        return None
+    for name in _command_name_variants(tokens[i]):
+        for danger in _DANGEROUS_NAMES:
+            if name == danger or (any(ch in name for ch in "*?[") and fnmatch.fnmatchcase(danger, name)):
+                return danger
+    return None
+
+
 def _deny_in(raw: str, mask: str) -> str | None:
     """Scan one sub-command: raw text and its quote-masked copy of equal length."""
     for m in _CMD_WORD_RE.finditer(mask):
@@ -593,6 +642,17 @@ def hard_deny_reason(sub_command: str) -> str | None:
     reason = _deny_in(text, mask)
     if reason:
         return reason
+
+    # "find", $'find', fi{n,}d, /usr/bin/fin?, ${x:-find}: the first word rewritten the way the shell resolves it.
+    plain = _resolve_command_word(text)
+    if plain:
+        tokens = text.split()
+        k = next((j for j, tok in enumerate(tokens) if plain in _command_name_variants(tok)
+                  or any(ch in tok for ch in "*?[")), 0)
+        rebuilt = " ".join([plain] + tokens[k + 1:])
+        reason = _deny_in(rebuilt, _mask_quotes(rebuilt)[0])
+        if reason:
+            return reason
 
     # f"i"nd and fi'n'd: fragments glued by quotes. Join them and look again,
     # but only when a quote sits between word characters, so grep "find /" stays data.

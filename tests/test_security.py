@@ -473,6 +473,18 @@ class TestHardDeny:
         "find /etc -maxdepth 1 -delete",
         "find / -maxdepth 2 -exec rm -rf {} ;",
         "find /var/www -maxdepth 1 -execdir rm {} ;",
+        "\"find\" / -name x",
+        "'pkill' -f gunicorn",
+        "$'find' /var -type f",
+        "fi{n,}d /opt -name x",
+        "/usr/bin/fin? /home -type f",
+        "./fin* /srv -name x",
+        "${x:-find} / -name y",
+        "${FIND-find} /etc -type f",
+        "\\f\\i\\n\\d /var -name x",
+        "sudo \"rm\" -rf /etc",
+        "timeout 5 'find' /var -name x",
+        "/usr/bin/fin* --version",
     ])
     def test_refused_even_when_confirmed(self, cmd):
         with pytest.raises(PermissionError, match="Refused"):
@@ -508,6 +520,8 @@ class TestHardDeny:
         "find /opt/app/tmp -maxdepth 1 -mtime +7 -exec rm {} ;",
         "find /var/log -maxdepth 8 -name '*.gz'",
         "echo 'find /' > /dev/null",
+        "\"grep\" -rn 'find' /opt/app",
+        "{ls,} /tmp",
         "docker run --rm alpine ls",
         "findmnt /",
         "cat /etc/alarm.conf",
