@@ -100,7 +100,8 @@ _MUTATING_TOKENS: dict[str, tuple[str, ...]] = {
              "-f ", "--form", "--output", "-o "),
     "wget": ("--post-data", "--post-file", "-o ", "--output-document",
              "--ftp-user", "--execute"),
-    "find": ("-exec ", "-execdir ", "-delete", "-ok ", "-okdir "),
+    "find": ("-exec ", "-execdir ", "-delete", "-ok ", "-okdir ",
+             "-fprint", "-fprintf", "-fprint0", "-fls"),  # these write files
     # Reading is fine (ip a, ip route show); changing addresses, routes or link
     # state on a remote box is how you lock yourself out.
     "ip": ("set ", "del ", "add ", "flush", "change ", "replace ", "append "),

@@ -92,6 +92,9 @@ class TestSshCommandConditionallyAllowlisted:
         "find /tmp -maxdepth 1 -exec rm -rf {} ;",
         "find /tmp -maxdepth 1 -execdir ls {} ;",
         "find /tmp -maxdepth 1 -delete",
+        "find /tmp -maxdepth 1 -fprint /tmp/out",
+        "find /tmp -maxdepth 1 -fprintf /tmp/out %p",
+        "find /tmp -maxdepth 1 -fls /tmp/out",
         # awk: requires confirmed (can shell out via system())
         "awk '{print}' file.txt",
     ])
