@@ -15,6 +15,7 @@ can enforce that prompt by protocol instead of by convention.
 **What it protects against:**
 - **SSH read-only by default** — only safe, read-only commands are allowed without `confirmed=true` (uptime, df, cat, grep, journalctl, systemctl status, docker ps, etc.)
 - **Conditionally safe commands** — `sed`, `curl`, `wget`, `find` allowed only when no mutating flags are present (`sed -i`, `curl -X POST`, `find -exec` require `confirmed=true`)
+- **Hard denials** — `find` without `-maxdepth`, `pkill -f` / `pgrep -f` without a `[b]racket` pattern, and `rm -r` on `/` or a top-level directory are refused even with `confirmed=true`; each entry comes from a real incident (see CHANGELOG 0.5.3)
 - **SSH command injection** — blocks `$(...)` and backtick substitution; output redirection always blocked
 - **Path traversal in log access** — `log_tail` resolves symlinks and checks against an allowlist
 - **Unauthorized Docker container control** — `stop` and `restart` require `confirmed=true`

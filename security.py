@@ -440,6 +440,71 @@ def _split_shell_commands(command: str) -> list[str]:
     return parts
 
 
+# ---------------------------------------------------------------------------
+# Hard denials: commands with no safe form, refused even with confirmed=true.
+# Each entry is a real incident, not a guess:
+#   find without -maxdepth walked a whole production disk (10.03.2026);
+#   pkill -f matched its own command line and killed the session (04.10.2026);
+#   rm -r on a top-level directory has no legitimate use through this tool.
+# ---------------------------------------------------------------------------
+
+_WRAPPER_COMMANDS = frozenset({"sudo", "nice", "nohup", "time", "env"})
+_PROTECTED_RM_TARGETS = frozenset({
+    "/", "/bin", "/boot", "/etc", "/home", "/lib", "/lib64", "/media", "/mnt",
+    "/opt", "/root", "/sbin", "/srv", "/usr", "/var", "/var/lib", "/var/www",
+})
+
+
+def _strip_wrappers(tokens: list[str]) -> list[str]:
+    """Drop sudo/nice/nohup prefixes (and sudo's -u user) to reach the real command."""
+    i = 0
+    while i < len(tokens) and tokens[i].lower() in _WRAPPER_COMMANDS:
+        if tokens[i].lower() == "sudo":
+            i += 1
+            while i < len(tokens) and tokens[i].startswith("-"):
+                i += 2 if tokens[i] in ("-u", "-g") else 1
+        else:
+            i += 1
+    return tokens[i:]
+
+
+def _short_flags(tokens: list[str]) -> str:
+    return "".join(tok[1:] for tok in tokens if tok.startswith("-") and not tok.startswith("--"))
+
+
+def hard_deny_reason(sub_command: str) -> str | None:
+    """Return why a single sub-command is refused outright, or None."""
+    tokens = _strip_wrappers(sub_command.strip().split())
+    if not tokens:
+        return None
+    first = tokens[0].lower()
+    args = tokens[1:]
+
+    if first == "find" and "-maxdepth" not in args:
+        return "find without -maxdepth is refused: add -maxdepth N (unbounded walk, incident 10.03.2026)"
+
+    if first in ("pkill", "pgrep"):
+        full_match = "f" in _short_flags(args) or "--full" in args
+        bracket_pattern = any(tok.lstrip("\"'").startswith("[") for tok in args)
+        if full_match and not bracket_pattern:
+            return (f"{first} -f is refused: it matches its own command line (incident 04.10.2026); "
+                    "use a '[r]un-x' style pattern or kill by PID")
+
+    if first == "rm":
+        recursive = "r" in _short_flags(args).lower() or "--recursive" in args
+        if recursive:
+            for tok in args:
+                if tok.startswith("-"):
+                    continue
+                path = tok.strip("\"'")
+                if path.endswith("/*"):
+                    path = path[:-2] or "/"
+                path = path.rstrip("/") or "/"
+                if path in _PROTECTED_RM_TARGETS:
+                    return f"rm -r on {path} is refused regardless of confirmation"
+    return None
+
+
 def validate_ssh_command(command: str, confirmed: bool) -> None:
     if len(command) > 500:
         raise ValueError("Command exceeds maximum length of 500 characters")
@@ -458,8 +523,15 @@ def validate_ssh_command(command: str, confirmed: bool) -> None:
     if _writes_to_file(mask):
         raise ValueError("Output redirection to a file is not allowed")
 
-    # Read-only allowlist check: every sub-command must be safe or confirmed required
     sub_commands = _split_shell_commands(command)
+
+    # Hard denials come before the allowlist: these are refused with or without confirmed.
+    for sc in sub_commands:
+        reason = hard_deny_reason(sc)
+        if reason:
+            raise PermissionError(f"Refused: {reason}")
+
+    # Read-only allowlist check: every sub-command must be safe or confirmed required
     unsafe = [sc.strip() for sc in sub_commands if sc.strip() and not _is_subcommand_safe(sc)]
 
     if unsafe:

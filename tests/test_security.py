@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 from security import (
+    hard_deny_reason,
     validate_ssh_command,
     validate_ssh_key_path,
     validate_host_port,
@@ -68,7 +69,7 @@ class TestSshCommandConditionallyAllowlisted:
         "wget http://localhost/check",
         # find: no -exec/-delete
         "find /var/log -name '*.log' -maxdepth 2",
-        "find /tmp -type f -mtime +7",
+        "find /tmp -maxdepth 3 -type f -mtime +7",
     ])
     def test_conditionally_safe_without_confirmed(self, cmd):
         validate_ssh_command(cmd, confirmed=False)
@@ -88,9 +89,9 @@ class TestSshCommandConditionallyAllowlisted:
         "wget -O /tmp/file http://x/",
         "wget --output-document=/tmp/x http://x/",
         # find: execution
-        "find / -exec rm -rf {} ;",
-        "find / -execdir ls {} ;",
-        "find /tmp -delete",
+        "find / -maxdepth 1 -exec rm -rf {} ;",
+        "find / -maxdepth 1 -execdir ls {} ;",
+        "find /tmp -maxdepth 1 -delete",
         # awk: requires confirmed (can shell out via system())
         "awk '{print}' file.txt",
     ])
@@ -103,8 +104,8 @@ class TestSshCommandRequiresConfirmed:
     """Commands that require confirmed=true."""
 
     @pytest.mark.parametrize("cmd", [
-        "rm -rf /",
-        "sudo rm -rf /",
+        "rm -rf /var/www/old",
+        "sudo rm -rf /opt/app/releases/old",
         "reboot",
         "shutdown -h now",
         "systemctl stop nginx",
@@ -404,3 +405,53 @@ class TestLogPath:
         monkeypatch.setattr(pathlib.Path, "is_file", lambda self: True)
         result = validate_log_path("/var/log/syslog")
         assert str(result) == "/var/log/syslog"
+
+
+# ---------------------------------------------------------------------------
+# Hard denials: refused even with confirmed=true
+# ---------------------------------------------------------------------------
+
+class TestHardDeny:
+    @pytest.mark.parametrize("cmd", [
+        "find / -name '*.log'",
+        "find /var/www -name '*.php' -mtime -1",
+        "sudo find /home -type f",
+        "ls /tmp && find /opt -name x",
+        "pkill -f run-all61b.sh",
+        "pgrep -f 'run-all'",
+        "sudo pkill -9 -f gunicorn",
+        "pkill --full worker",
+        "rm -rf /",
+        "rm -rf /*",
+        "rm -r /etc",
+        "sudo rm -rf /var/lib/",
+        "rm -Rf /home",
+        "cd /tmp; rm -rf /opt",
+    ])
+    def test_refused_even_when_confirmed(self, cmd):
+        with pytest.raises(PermissionError, match="Refused"):
+            validate_ssh_command(cmd, confirmed=True)
+        with pytest.raises(PermissionError, match="Refused"):
+            validate_ssh_command(cmd, confirmed=False)
+
+    @pytest.mark.parametrize("cmd", [
+        "find /var/log -maxdepth 2 -name '*.log'",
+        "find /opt/app -maxdepth 3 -type f | head -20",
+        "pkill -f '[r]un-all61b'",
+        "pgrep -f \"[g]unicorn\"",
+        "pkill nginx",
+        "pgrep -l sshd",
+        "kill -9 12345",
+        "rm -rf /tmp/build",
+        "rm -r /var/www/html/old-release",
+        "rm /etc/nginx/sites-enabled/old.conf",
+        "rm -f /var/log/app.log.1",
+        "grep -rn 'find /' /opt/app/scripts",
+    ])
+    def test_safe_forms_pass_hard_deny(self, cmd):
+        for sc in cmd.split("|"):
+            assert hard_deny_reason(sc) is None, sc
+
+    def test_strip_sudo_user_option(self):
+        assert hard_deny_reason("sudo -u www-data find /var/www -name x") is not None
+        assert hard_deny_reason("sudo -u www-data find /var/www -maxdepth 2 -name x") is None

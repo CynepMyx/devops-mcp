@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.5.3] - 2026-10-12
+
+### Added
+- Hard denials in `validate_ssh_command`: a few commands are refused even with `confirmed=true`, because they have no safe form. `find` without `-maxdepth` (an unbounded walk took a production box down on 10.03.2026), `pkill -f` and `pgrep -f` without a `[b]racket` pattern (the pattern matched its own command line and killed the session on 04.10.2026), and `rm -r` on `/` or a top-level directory such as `/etc`, `/var`, `/home`. `sudo`, `nice`, `nohup` and `env` prefixes are looked through. Everything else keeps the allowlist-plus-confirmation model.
+
 ## [0.5.2] - 2026-09-27
 
 ### Fixed
