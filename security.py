@@ -504,7 +504,42 @@ def _rm_target_reason(target: str) -> str | None:
 
 _INTERPRETER_RE = re.compile(r"(?<![\w.-])(bash|sh|zsh|dash|ksh|eval|su|ssh|xargs)(?![\w.-])")
 _QUOTED_RE = re.compile(r"'([^']*)'|\"([^\"]*)\"")
-_SPLIT_WORD_RE = re.compile(r"\w[\"']\w")
+_SPLIT_WORD_RE = re.compile(r"\w[\"']+\w")
+
+
+_FIND_MAX_DEPTH = 8
+_FIND_VALUE_OPTS = frozenset({
+    "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-regex", "-iregex", "-lname",
+    "-ilname", "-newer", "-anewer", "-cnewer", "-user", "-group", "-uid", "-gid", "-perm", "-size",
+    "-mtime", "-atime", "-ctime", "-mmin", "-amin", "-cmin", "-type", "-xtype", "-fstype", "-printf",
+    "-fprintf", "-fprint", "-fprint0", "-links", "-inum", "-samefile", "-used", "-context",
+})
+_FIND_ACTIONS = frozenset({"-delete", "-exec", "-execdir", "-ok", "-okdir"})
+
+
+def _find_reason(args: list[str], raw_args: list[str]) -> str | None:
+    """-maxdepth must be an option of find itself, followed by a small number."""
+    depth = None
+    for i, tok in enumerate(args):
+        if tok == "-maxdepth" and (i == 0 or args[i - 1] not in _FIND_VALUE_OPTS):
+            if i + 1 < len(args) and args[i + 1].isdigit():
+                depth = int(args[i + 1])
+            break
+    if depth is None:
+        return "find without -maxdepth N is refused (unbounded walk, incident 10.03.2026)"
+    if depth > _FIND_MAX_DEPTH:
+        return f"find -maxdepth {depth} is refused: the limit is {_FIND_MAX_DEPTH}, narrow the start path instead"
+    if any(a in _FIND_ACTIONS for a in args):
+        starts = []
+        for tok in raw_args:
+            if tok.startswith(("-", "(", "!")):
+                break
+            starts.append(tok)
+        for tok in starts:
+            reason = _rm_target_reason(tok)
+            if reason:
+                return reason.replace("rm -r", "find -delete/-exec")
+    return None
 
 
 def _deny_in(raw: str, mask: str) -> str | None:
@@ -515,8 +550,9 @@ def _deny_in(raw: str, mask: str) -> str | None:
         raw_args = raw[m.end():].split()
 
         if word == "find":
-            if "-maxdepth" not in args:
-                return "find without -maxdepth is refused: add -maxdepth N (unbounded walk, incident 10.03.2026)"
+            reason = _find_reason(args, raw_args)
+            if reason:
+                return reason
 
         elif word in ("pkill", "pgrep"):
             full_match = "f" in _short_flags(args) or any(_long_opt(a, "--full") for a in args)
@@ -603,6 +639,16 @@ def validate_ssh_command(command: str, confirmed: bool) -> None:
         reason = hard_deny_reason(sc)
         if reason:
             raise PermissionError(f"Refused: {reason}")
+    # An interpreter anywhere in the pipeline turns every quoted string into code:
+    # echo 'find /' | sh, printf ... | bash -s.
+    if _INTERPRETER_RE.search(mask):
+        for m in _QUOTED_RE.finditer(command):
+            payload = m.group(1) if m.group(1) is not None else m.group(2)
+            for sc in _split_shell_commands(payload):
+                if sc.strip():
+                    reason = hard_deny_reason(sc)
+                    if reason:
+                        raise PermissionError(f"Refused: {reason}")
 
     # Read-only allowlist check: every sub-command must be safe or confirmed required
     unsafe = [sc.strip() for sc in sub_commands if sc.strip() and not _is_subcommand_safe(sc)]

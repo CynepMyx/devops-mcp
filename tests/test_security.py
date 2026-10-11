@@ -89,8 +89,8 @@ class TestSshCommandConditionallyAllowlisted:
         "wget -O /tmp/file http://x/",
         "wget --output-document=/tmp/x http://x/",
         # find: execution
-        "find / -maxdepth 1 -exec rm -rf {} ;",
-        "find / -maxdepth 1 -execdir ls {} ;",
+        "find /tmp -maxdepth 1 -exec rm -rf {} ;",
+        "find /tmp -maxdepth 1 -execdir ls {} ;",
         "find /tmp -maxdepth 1 -delete",
         # awk: requires confirmed (can shell out via system())
         "awk '{print}' file.txt",
@@ -464,6 +464,15 @@ class TestHardDeny:
         "fi'n'd /opt -name x",
         "r\"m\" -rf /etc",
         "pkill -f '[^x]run'",
+        "fi''nd / -name x",
+        "echo 'find / -name x' | sh",
+        "printf 'pkill -f gunicorn' | bash -s",
+        "find / -name -maxdepth",
+        "find / -name x -maxdepth",
+        "find / -maxdepth 999 -name x",
+        "find /etc -maxdepth 1 -delete",
+        "find / -maxdepth 2 -exec rm -rf {} ;",
+        "find /var/www -maxdepth 1 -execdir rm {} ;",
     ])
     def test_refused_even_when_confirmed(self, cmd):
         with pytest.raises(PermissionError, match="Refused"):
@@ -495,6 +504,10 @@ class TestHardDeny:
         "bash -c 'find /var/log -maxdepth 1 -name x'",
         "bash -c 'ls /opt'",
         "awk '{print $1}' /var/log/syslog",
+        "find /var/www/html -maxdepth 2 -name '*.php' -delete",
+        "find /opt/app/tmp -maxdepth 1 -mtime +7 -exec rm {} ;",
+        "find /var/log -maxdepth 8 -name '*.gz'",
+        "echo 'find /' > /dev/null",
         "docker run --rm alpine ls",
         "findmnt /",
         "cat /etc/alarm.conf",
