@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 from security import (
+    hard_deny_reason,
     validate_ssh_command,
     validate_ssh_key_path,
     validate_host_port,
@@ -68,7 +69,7 @@ class TestSshCommandConditionallyAllowlisted:
         "wget http://localhost/check",
         # find: no -exec/-delete
         "find /var/log -name '*.log' -maxdepth 2",
-        "find /tmp -type f -mtime +7",
+        "find /tmp -maxdepth 3 -type f -mtime +7",
     ])
     def test_conditionally_safe_without_confirmed(self, cmd):
         validate_ssh_command(cmd, confirmed=False)
@@ -88,9 +89,12 @@ class TestSshCommandConditionallyAllowlisted:
         "wget -O /tmp/file http://x/",
         "wget --output-document=/tmp/x http://x/",
         # find: execution
-        "find / -exec rm -rf {} ;",
-        "find / -execdir ls {} ;",
-        "find /tmp -delete",
+        "find /tmp -maxdepth 1 -exec rm -rf {} ;",
+        "find /tmp -maxdepth 1 -execdir ls {} ;",
+        "find /tmp -maxdepth 1 -delete",
+        "find /tmp -maxdepth 1 -fprint /tmp/out",
+        "find /tmp -maxdepth 1 -fprintf /tmp/out %p",
+        "find /tmp -maxdepth 1 -fls /tmp/out",
         # awk: requires confirmed (can shell out via system())
         "awk '{print}' file.txt",
     ])
@@ -103,8 +107,8 @@ class TestSshCommandRequiresConfirmed:
     """Commands that require confirmed=true."""
 
     @pytest.mark.parametrize("cmd", [
-        "rm -rf /",
-        "sudo rm -rf /",
+        "rm -rf /var/www/old",
+        "sudo rm -rf /opt/app/releases/old",
         "reboot",
         "shutdown -h now",
         "systemctl stop nginx",
@@ -404,3 +408,132 @@ class TestLogPath:
         monkeypatch.setattr(pathlib.Path, "is_file", lambda self: True)
         result = validate_log_path("/var/log/syslog")
         assert str(result) == "/var/log/syslog"
+
+
+# ---------------------------------------------------------------------------
+# Hard denials: refused even with confirmed=true
+# ---------------------------------------------------------------------------
+
+class TestHardDeny:
+    @pytest.mark.parametrize("cmd", [
+        "find / -name '*.log'",
+        "find /var/www -name '*.php' -mtime -1",
+        "sudo find /home -type f",
+        "sudo -u www-data find /var/www -name x",
+        "nice -n 10 find /var -type f",
+        "timeout 5 find / -name x",
+        "ionice -c3 nice -n 19 find /srv -newer x",
+        "/usr/bin/find /opt -name x",
+        "busybox find /tmp -type f",
+        "xargs find /var -name",
+        "ls /tmp && find /opt -name x",
+        "pkill -f run-all61b.sh",
+        "pgrep -f 'run-all'",
+        "sudo pkill -9 -f gunicorn",
+        "pkill --full worker",
+        "pgrep --fu worker",
+        "/usr/bin/pkill -f celery",
+        "rm -rf /",
+        "rm -rf /*",
+        "rm -r /etc",
+        "rm --recurs /etc",
+        "rm --recursive --force /home",
+        "sudo rm -rf /var/lib/",
+        "rm -Rf /home",
+        "cd /tmp; rm -rf /opt",
+        "rm -rf //etc/",
+        "rm -rf /etc/.",
+        "rm -rf /var/www/../..",
+        "rm -rf /et?",
+        "rm -rf /{etc,var}",
+        "rm -rf /var/l*",
+        "rm -rf ~",
+        "rm -rf ~/",
+        "rm -rf $HOME",
+        "rm -rf .",
+        "rm -rf ..",
+        "rm -rf ../../etc",
+        "rm -rf -- /etc",
+        "/bin/rm -rf /usr",
+        "bash -c 'find / -name x'",
+        "sh -c \"pkill -f gunicorn\"",
+        "sudo su -c 'rm -rf /etc'",
+        "eval 'find /var -type f'",
+        "ssh other 'find /home -name x'",
+        "xargs -I{} sh -c 'rm -rf /opt'",
+        "timeout 5 bash -c 'cd /x; find . -name y'",
+        "f\\ind / -name x",
+        "f\"i\"nd /var -type f",
+        "fi'n'd /opt -name x",
+        "r\"m\" -rf /etc",
+        "pkill -f '[^x]run'",
+        "fi''nd / -name x",
+        "echo 'find / -name x' | sh",
+        "printf 'pkill -f gunicorn' | bash -s",
+        "find / -name -maxdepth",
+        "find / -name x -maxdepth",
+        "find / -maxdepth 999 -name x",
+        "find /etc -maxdepth 1 -delete",
+        "find / -maxdepth 2 -exec rm -rf {} ;",
+        "find /var/www -maxdepth 1 -execdir rm {} ;",
+        "\"find\" / -name x",
+        "'pkill' -f gunicorn",
+        "$'find' /var -type f",
+        "fi{n,}d /opt -name x",
+        "/usr/bin/fin? /home -type f",
+        "./fin* /srv -name x",
+        "${x:-find} / -name y",
+        "${FIND-find} /etc -type f",
+        "\\f\\i\\n\\d /var -name x",
+        "sudo \"rm\" -rf /etc",
+        "timeout 5 'find' /var -name x",
+        "/usr/bin/fin* --version",
+    ])
+    def test_refused_even_when_confirmed(self, cmd):
+        with pytest.raises(PermissionError, match="Refused"):
+            validate_ssh_command(cmd, confirmed=True)
+        with pytest.raises(PermissionError, match="Refused"):
+            validate_ssh_command(cmd, confirmed=False)
+
+    @pytest.mark.parametrize("cmd", [
+        "find /var/log -maxdepth 2 -name '*.log'",
+        "find /opt/app -maxdepth 3 -type f | head -20",
+        "sudo -u www-data find /var/www -maxdepth 2 -name x",
+        "nice -n 10 find /var -maxdepth 1 -type f",
+        "pkill -f '[r]un-all61b'",
+        "pgrep -f \"[g]unicorn\"",
+        "pkill nginx",
+        "pgrep -l sshd",
+        "kill -9 12345",
+        "rm -rf /tmp/build",
+        "rm -r /var/www/html/old-release",
+        "rm -rf /var/www/old*",
+        "rm -rf /opt/app/releases/2026-*",
+        "rm /etc/nginx/sites-enabled/old.conf",
+        "rm -f /var/log/app.log.1",
+        "rm -rf old-release",
+        "grep -rn 'find /' /opt/app/scripts",
+        "grep -n \"pkill -f\" /opt/app/run.sh",
+        "grep -n 'bash -c' /opt/app/run.sh",
+        "echo 'sh -c' 'find /'",
+        "bash -c 'find /var/log -maxdepth 1 -name x'",
+        "bash -c 'ls /opt'",
+        "awk '{print $1}' /var/log/syslog",
+        "find /var/www/html -maxdepth 2 -name '*.php' -delete",
+        "find /opt/app/tmp -maxdepth 1 -mtime +7 -exec rm {} ;",
+        "find /var/log -maxdepth 8 -name '*.gz'",
+        "echo 'find /' > /dev/null",
+        "\"grep\" -rn 'find' /opt/app",
+        "{ls,} /tmp",
+        "docker run --rm alpine ls",
+        "findmnt /",
+        "cat /etc/alarm.conf",
+    ])
+    def test_safe_forms_pass_hard_deny(self, cmd):
+        for sc in cmd.split("|"):
+            assert hard_deny_reason(sc) is None, sc
+
+    def test_word_outside_quotes_counts_even_as_data(self):
+        # Documented trade-off: the bare word is refused, the quoted one passes.
+        assert hard_deny_reason("echo find") is not None
+        assert hard_deny_reason("echo 'find'") is None

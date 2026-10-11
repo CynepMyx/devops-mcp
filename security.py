@@ -1,4 +1,5 @@
 import os
+import fnmatch
 import re
 from pathlib import Path, PurePosixPath
 
@@ -99,7 +100,8 @@ _MUTATING_TOKENS: dict[str, tuple[str, ...]] = {
              "-f ", "--form", "--output", "-o "),
     "wget": ("--post-data", "--post-file", "-o ", "--output-document",
              "--ftp-user", "--execute"),
-    "find": ("-exec ", "-execdir ", "-delete", "-ok ", "-okdir "),
+    "find": ("-exec ", "-execdir ", "-delete", "-ok ", "-okdir ",
+             "-fprint", "-fprintf", "-fprint0", "-fls"),  # these write files
     # Reading is fine (ip a, ip route show); changing addresses, routes or link
     # state on a remote box is how you lock yourself out.
     "ip": ("set ", "del ", "add ", "flush", "change ", "replace ", "append "),
@@ -440,6 +442,239 @@ def _split_shell_commands(command: str) -> list[str]:
     return parts
 
 
+# ---------------------------------------------------------------------------
+# Hard denials: commands with no safe form, refused even with confirmed=true.
+# Each entry is a real incident, not a guess:
+#   find without -maxdepth walked a whole production disk (10.03.2026);
+#   pkill -f matched its own command line and killed the session (04.10.2026);
+#   rm -r on a top-level directory has no legitimate use through this tool.
+#
+# The check looks for the command *word* anywhere outside quotes, not just in
+# first position, so wrappers (sudo, nice -n 10, timeout 5, xargs, busybox),
+# absolute paths (/usr/bin/find) and chained prefixes cannot hide it. The price
+# is that `echo find` is refused too; quote the word if it is data.
+# ---------------------------------------------------------------------------
+
+_PROTECTED_RM_TARGETS = frozenset({
+    "/", "/bin", "/boot", "/etc", "/home", "/lib", "/lib64", "/media", "/mnt",
+    "/opt", "/root", "/sbin", "/srv", "/usr", "/var", "/var/lib", "/var/www",
+})
+_CMD_WORD_RE = re.compile(r"(?<![\w.-])(find|pkill|pgrep|rm)(?![\w.-])")
+_GLOB_CHARS = set("*?[{")
+
+
+def _long_opt(token: str, full: str) -> bool:
+    """GNU getopt accepts any unambiguous abbreviation: --recurs == --recursive."""
+    name = token.split("=", 1)[0]
+    return name.startswith("--") and len(name) >= 4 and full.startswith(name)
+
+
+def _short_flags(tokens: list[str]) -> str:
+    return "".join(tok[1:] for tok in tokens if tok.startswith("-") and not tok.startswith("--"))
+
+
+def _rm_target_reason(target: str) -> str | None:
+    raw = target.strip("\"'")
+    if not raw:
+        return None
+    if raw[0] in "~$":
+        return f"rm -r on {raw} is refused: home directory or variable target"
+    path = PurePosixPath(raw)
+    norm = str(path) if raw.startswith("/") else None
+    if norm is None:
+        parts = path.parts
+        if not parts or parts[0] in (".", "..") or ".." in parts:
+            return f"rm -r on {raw} is refused: relative path through . or .."
+        return None
+    # PurePosixPath does not resolve '..'; do it by hand so /var/www/../.. is seen as /.
+    resolved: list[str] = []
+    for part in path.parts[1:]:
+        if part == "..":
+            if resolved:
+                resolved.pop()
+        elif part != ".":
+            resolved.append(part)
+    if resolved and resolved[-1] == "*":
+        resolved.pop()
+    norm = "/" + "/".join(resolved)
+    if norm in _PROTECTED_RM_TARGETS:
+        return f"rm -r on {norm} is refused regardless of confirmation"
+    if any(ch in _GLOB_CHARS for ch in norm) and len(resolved) <= 2:
+        return f"rm -r with a glob near the root ({norm}) is refused"
+    return None
+
+
+_INTERPRETER_RE = re.compile(r"(?<![\w.-])(bash|sh|zsh|dash|ksh|eval|su|ssh|xargs)(?![\w.-])")
+_QUOTED_RE = re.compile(r"'([^']*)'|\"([^\"]*)\"")
+_SPLIT_WORD_RE = re.compile(r"\w[\"']+\w")
+
+
+_FIND_MAX_DEPTH = 8
+_FIND_VALUE_OPTS = frozenset({
+    "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-regex", "-iregex", "-lname",
+    "-ilname", "-newer", "-anewer", "-cnewer", "-user", "-group", "-uid", "-gid", "-perm", "-size",
+    "-mtime", "-atime", "-ctime", "-mmin", "-amin", "-cmin", "-type", "-xtype", "-fstype", "-printf",
+    "-fprintf", "-fprint", "-fprint0", "-links", "-inum", "-samefile", "-used", "-context",
+})
+_FIND_ACTIONS = frozenset({"-delete", "-exec", "-execdir", "-ok", "-okdir"})
+
+
+def _find_reason(args: list[str], raw_args: list[str]) -> str | None:
+    """-maxdepth must be an option of find itself, followed by a small number."""
+    depth = None
+    for i, tok in enumerate(args):
+        if tok == "-maxdepth" and (i == 0 or args[i - 1] not in _FIND_VALUE_OPTS):
+            if i + 1 < len(args) and args[i + 1].isdigit():
+                depth = int(args[i + 1])
+            break
+    if depth is None:
+        return "find without -maxdepth N is refused (unbounded walk, incident 10.03.2026)"
+    if depth > _FIND_MAX_DEPTH:
+        return f"find -maxdepth {depth} is refused: the limit is {_FIND_MAX_DEPTH}, narrow the start path instead"
+    if any(a in _FIND_ACTIONS for a in args):
+        starts = []
+        for tok in raw_args:
+            if tok.startswith(("-", "(", "!")):
+                break
+            starts.append(tok)
+        for tok in starts:
+            reason = _rm_target_reason(tok)
+            if reason:
+                return reason.replace("rm -r", "find -delete/-exec")
+    return None
+
+
+_DANGEROUS_NAMES = ("find", "pkill", "pgrep", "rm")
+_WRAPPER_WORDS = frozenset({"sudo", "nice", "nohup", "time", "env", "command", "exec", "timeout", "ionice", "stdbuf"})
+_BRACE_RE = re.compile(r"^(.*?)\{([^{}]*)\}(.*)$")
+_VAR_DEFAULT_RE = re.compile(r"\$\{[^}]*?[:]?[-=+?]([^}]*)\}")
+
+
+def _brace_variants(token: str) -> list[str]:
+    """fi{n,}d -> ['find', 'fid'] (one level is enough: the shell's result is still a word)."""
+    m = _BRACE_RE.match(token)
+    if not m:
+        return [token]
+    pre, body, post = m.groups()
+    out = []
+    for alt in body.split(","):
+        out.extend(_brace_variants(pre + alt + post))
+    return out
+
+
+def _command_name_variants(token: str) -> set[str]:
+    """Spellings the shell could resolve to the same program name: quotes, $'..', \\, braces, ${x:-word}."""
+    base = token.replace("\\", "")
+    names = set()
+    for m in _VAR_DEFAULT_RE.finditer(base):
+        names.add(m.group(1).strip("\"'").rsplit("/", 1)[-1])
+    variants = [base] if "${" in base else _brace_variants(base)
+    for v in variants:
+        v = v.replace("$'", "").replace("'", "").replace('"', "")
+        names.add(v.rsplit("/", 1)[-1])
+    return {n for n in names if n}
+
+
+def _resolve_command_word(sub_command: str) -> str | None:
+    """If the first word (after wrappers) is a disguised dangerous name, return the plain name."""
+    tokens = sub_command.split()
+    i = 0
+    while i < len(tokens) and tokens[i].replace("\\", "").strip("\"'").lower() in _WRAPPER_WORDS:
+        i += 1
+        while i < len(tokens) and (tokens[i].startswith("-") or "=" in tokens[i] or tokens[i].isdigit()):
+            i += 1
+    if i >= len(tokens):
+        return None
+    for name in _command_name_variants(tokens[i]):
+        for danger in _DANGEROUS_NAMES:
+            if name == danger or (any(ch in name for ch in "*?[") and fnmatch.fnmatchcase(danger, name)):
+                return danger
+    return None
+
+
+def _deny_in(raw: str, mask: str) -> str | None:
+    """Scan one sub-command: raw text and its quote-masked copy of equal length."""
+    for m in _CMD_WORD_RE.finditer(mask):
+        word = m.group(1)
+        args = mask[m.end():].split()
+        raw_args = raw[m.end():].split()
+
+        if word == "find":
+            reason = _find_reason(args, raw_args)
+            if reason:
+                return reason
+
+        elif word in ("pkill", "pgrep"):
+            full_match = "f" in _short_flags(args) or any(_long_opt(a, "--full") for a in args)
+            # Only the classic '[r]un' trick is accepted: a one-character class cannot match
+            # the bracket in its own command line. '[^x]run' would.
+            bracket_pattern = any(re.match(r"^\[\w\]", tok.lstrip("\"'")) for tok in raw_args)
+            if full_match and not bracket_pattern:
+                return (f"{word} -f is refused: it matches its own command line (incident 04.10.2026); "
+                        "use a '[r]un-x' style pattern or kill by PID")
+
+        elif word == "rm":
+            recursive = "r" in _short_flags(args).lower() or any(_long_opt(a, "--recursive") for a in args)
+            if recursive:
+                after_dashdash = False
+                for tok in raw_args:
+                    if tok == "--":
+                        after_dashdash = True
+                        continue
+                    if tok.startswith("-") and not after_dashdash:
+                        continue
+                    reason = _rm_target_reason(tok)
+                    if reason:
+                        return reason
+    return None
+
+
+def hard_deny_reason(sub_command: str) -> str | None:
+    """Return why a single sub-command is refused outright, or None.
+
+    Not a shell parser. It covers the spellings seen in practice and the cheap
+    disguises (wrappers, abbreviations, backslashes, split quotes, quoted
+    payloads handed to sh -c / eval / ssh); a variable that expands to the word,
+    or base64 piped into a shell, is for the allowlist and confirmed=true to catch.
+    """
+    # The shell drops unquoted backslashes: f\ind is find.
+    text = sub_command.replace("\\", "")
+    mask, _ = _mask_quotes(text)
+    reason = _deny_in(text, mask)
+    if reason:
+        return reason
+
+    # "find", $'find', fi{n,}d, /usr/bin/fin?, ${x:-find}: the first word rewritten the way the shell resolves it.
+    plain = _resolve_command_word(text)
+    if plain:
+        tokens = text.split()
+        k = next((j for j, tok in enumerate(tokens) if plain in _command_name_variants(tok)
+                  or any(ch in tok for ch in "*?[")), 0)
+        rebuilt = " ".join([plain] + tokens[k + 1:])
+        reason = _deny_in(rebuilt, _mask_quotes(rebuilt)[0])
+        if reason:
+            return reason
+
+    # f"i"nd and fi'n'd: fragments glued by quotes. Join them and look again,
+    # but only when a quote sits between word characters, so grep "find /" stays data.
+    if _SPLIT_WORD_RE.search(text):
+        joined = text.replace("'", "").replace('"', "")
+        reason = _deny_in(joined, joined)
+        if reason:
+            return reason
+
+    # Quoted text handed to an interpreter is code, not data.
+    if _INTERPRETER_RE.search(mask):
+        for m in _QUOTED_RE.finditer(text):
+            payload = m.group(1) if m.group(1) is not None else m.group(2)
+            for sc in _split_shell_commands(payload):
+                if sc.strip():
+                    reason = hard_deny_reason(sc)
+                    if reason:
+                        return reason
+    return None
+
+
 def validate_ssh_command(command: str, confirmed: bool) -> None:
     if len(command) > 500:
         raise ValueError("Command exceeds maximum length of 500 characters")
@@ -458,8 +693,25 @@ def validate_ssh_command(command: str, confirmed: bool) -> None:
     if _writes_to_file(mask):
         raise ValueError("Output redirection to a file is not allowed")
 
-    # Read-only allowlist check: every sub-command must be safe or confirmed required
     sub_commands = _split_shell_commands(command)
+
+    # Hard denials come before the allowlist: these are refused with or without confirmed.
+    for sc in sub_commands:
+        reason = hard_deny_reason(sc)
+        if reason:
+            raise PermissionError(f"Refused: {reason}")
+    # An interpreter anywhere in the pipeline turns every quoted string into code:
+    # echo 'find /' | sh, printf ... | bash -s.
+    if _INTERPRETER_RE.search(mask):
+        for m in _QUOTED_RE.finditer(command):
+            payload = m.group(1) if m.group(1) is not None else m.group(2)
+            for sc in _split_shell_commands(payload):
+                if sc.strip():
+                    reason = hard_deny_reason(sc)
+                    if reason:
+                        raise PermissionError(f"Refused: {reason}")
+
+    # Read-only allowlist check: every sub-command must be safe or confirmed required
     unsafe = [sc.strip() for sc in sub_commands if sc.strip() and not _is_subcommand_safe(sc)]
 
     if unsafe:
