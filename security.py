@@ -502,20 +502,17 @@ def _rm_target_reason(target: str) -> str | None:
     return None
 
 
-def hard_deny_reason(sub_command: str) -> str | None:
-    """Return why a single sub-command is refused outright, or None."""
-    mask, _ = _mask_quotes(sub_command)
-    raw_tokens = sub_command.split()
-    mask_tokens = mask.split()
+_INTERPRETER_RE = re.compile(r"(?<![\w.-])(bash|sh|zsh|dash|ksh|eval|su|ssh|xargs)(?![\w.-])")
+_QUOTED_RE = re.compile(r"'([^']*)'|\"([^\"]*)\"")
+_SPLIT_WORD_RE = re.compile(r"\w[\"']\w")
+
+
+def _deny_in(raw: str, mask: str) -> str | None:
+    """Scan one sub-command: raw text and its quote-masked copy of equal length."""
     for m in _CMD_WORD_RE.finditer(mask):
         word = m.group(1)
-        # arguments = tokens after the one holding the word, in the masked copy
-        idx = next((i for i, tok in enumerate(mask_tokens)
-                    if tok.endswith(word) and (len(tok) == len(word) or tok[-len(word) - 1] in "/\\")), None)
-        if idx is None:
-            continue
-        args = mask_tokens[idx + 1:]
-        raw_args = raw_tokens[idx + 1:] if len(raw_tokens) == len(mask_tokens) else args
+        args = mask[m.end():].split()
+        raw_args = raw[m.end():].split()
 
         if word == "find":
             if "-maxdepth" not in args:
@@ -523,7 +520,9 @@ def hard_deny_reason(sub_command: str) -> str | None:
 
         elif word in ("pkill", "pgrep"):
             full_match = "f" in _short_flags(args) or any(_long_opt(a, "--full") for a in args)
-            bracket_pattern = any(tok.lstrip("\"'").startswith("[") for tok in raw_args)
+            # Only the classic '[r]un' trick is accepted: a one-character class cannot match
+            # the bracket in its own command line. '[^x]run' would.
+            bracket_pattern = any(re.match(r"^\[\w\]", tok.lstrip("\"'")) for tok in raw_args)
             if full_match and not bracket_pattern:
                 return (f"{word} -f is refused: it matches its own command line (incident 04.10.2026); "
                         "use a '[r]un-x' style pattern or kill by PID")
@@ -539,6 +538,41 @@ def hard_deny_reason(sub_command: str) -> str | None:
                     if tok.startswith("-") and not after_dashdash:
                         continue
                     reason = _rm_target_reason(tok)
+                    if reason:
+                        return reason
+    return None
+
+
+def hard_deny_reason(sub_command: str) -> str | None:
+    """Return why a single sub-command is refused outright, or None.
+
+    Not a shell parser. It covers the spellings seen in practice and the cheap
+    disguises (wrappers, abbreviations, backslashes, split quotes, quoted
+    payloads handed to sh -c / eval / ssh); a variable that expands to the word,
+    or base64 piped into a shell, is for the allowlist and confirmed=true to catch.
+    """
+    # The shell drops unquoted backslashes: f\ind is find.
+    text = sub_command.replace("\\", "")
+    mask, _ = _mask_quotes(text)
+    reason = _deny_in(text, mask)
+    if reason:
+        return reason
+
+    # f"i"nd and fi'n'd: fragments glued by quotes. Join them and look again,
+    # but only when a quote sits between word characters, so grep "find /" stays data.
+    if _SPLIT_WORD_RE.search(text):
+        joined = text.replace("'", "").replace('"', "")
+        reason = _deny_in(joined, joined)
+        if reason:
+            return reason
+
+    # Quoted text handed to an interpreter is code, not data.
+    if _INTERPRETER_RE.search(mask):
+        for m in _QUOTED_RE.finditer(text):
+            payload = m.group(1) if m.group(1) is not None else m.group(2)
+            for sc in _split_shell_commands(payload):
+                if sc.strip():
+                    reason = hard_deny_reason(sc)
                     if reason:
                         return reason
     return None
