@@ -446,62 +446,101 @@ def _split_shell_commands(command: str) -> list[str]:
 #   find without -maxdepth walked a whole production disk (10.03.2026);
 #   pkill -f matched its own command line and killed the session (04.10.2026);
 #   rm -r on a top-level directory has no legitimate use through this tool.
+#
+# The check looks for the command *word* anywhere outside quotes, not just in
+# first position, so wrappers (sudo, nice -n 10, timeout 5, xargs, busybox),
+# absolute paths (/usr/bin/find) and chained prefixes cannot hide it. The price
+# is that `echo find` is refused too; quote the word if it is data.
 # ---------------------------------------------------------------------------
 
-_WRAPPER_COMMANDS = frozenset({"sudo", "nice", "nohup", "time", "env"})
 _PROTECTED_RM_TARGETS = frozenset({
     "/", "/bin", "/boot", "/etc", "/home", "/lib", "/lib64", "/media", "/mnt",
     "/opt", "/root", "/sbin", "/srv", "/usr", "/var", "/var/lib", "/var/www",
 })
+_CMD_WORD_RE = re.compile(r"(?<![\w.-])(find|pkill|pgrep|rm)(?![\w.-])")
+_GLOB_CHARS = set("*?[{")
 
 
-def _strip_wrappers(tokens: list[str]) -> list[str]:
-    """Drop sudo/nice/nohup prefixes (and sudo's -u user) to reach the real command."""
-    i = 0
-    while i < len(tokens) and tokens[i].lower() in _WRAPPER_COMMANDS:
-        if tokens[i].lower() == "sudo":
-            i += 1
-            while i < len(tokens) and tokens[i].startswith("-"):
-                i += 2 if tokens[i] in ("-u", "-g") else 1
-        else:
-            i += 1
-    return tokens[i:]
+def _long_opt(token: str, full: str) -> bool:
+    """GNU getopt accepts any unambiguous abbreviation: --recurs == --recursive."""
+    name = token.split("=", 1)[0]
+    return name.startswith("--") and len(name) >= 4 and full.startswith(name)
 
 
 def _short_flags(tokens: list[str]) -> str:
     return "".join(tok[1:] for tok in tokens if tok.startswith("-") and not tok.startswith("--"))
 
 
+def _rm_target_reason(target: str) -> str | None:
+    raw = target.strip("\"'")
+    if not raw:
+        return None
+    if raw[0] in "~$":
+        return f"rm -r on {raw} is refused: home directory or variable target"
+    path = PurePosixPath(raw)
+    norm = str(path) if raw.startswith("/") else None
+    if norm is None:
+        parts = path.parts
+        if not parts or parts[0] in (".", "..") or ".." in parts:
+            return f"rm -r on {raw} is refused: relative path through . or .."
+        return None
+    # PurePosixPath does not resolve '..'; do it by hand so /var/www/../.. is seen as /.
+    resolved: list[str] = []
+    for part in path.parts[1:]:
+        if part == "..":
+            if resolved:
+                resolved.pop()
+        elif part != ".":
+            resolved.append(part)
+    if resolved and resolved[-1] == "*":
+        resolved.pop()
+    norm = "/" + "/".join(resolved)
+    if norm in _PROTECTED_RM_TARGETS:
+        return f"rm -r on {norm} is refused regardless of confirmation"
+    if any(ch in _GLOB_CHARS for ch in norm) and len(resolved) <= 2:
+        return f"rm -r with a glob near the root ({norm}) is refused"
+    return None
+
+
 def hard_deny_reason(sub_command: str) -> str | None:
     """Return why a single sub-command is refused outright, or None."""
-    tokens = _strip_wrappers(sub_command.strip().split())
-    if not tokens:
-        return None
-    first = tokens[0].lower()
-    args = tokens[1:]
+    mask, _ = _mask_quotes(sub_command)
+    raw_tokens = sub_command.split()
+    mask_tokens = mask.split()
+    for m in _CMD_WORD_RE.finditer(mask):
+        word = m.group(1)
+        # arguments = tokens after the one holding the word, in the masked copy
+        idx = next((i for i, tok in enumerate(mask_tokens)
+                    if tok.endswith(word) and (len(tok) == len(word) or tok[-len(word) - 1] in "/\\")), None)
+        if idx is None:
+            continue
+        args = mask_tokens[idx + 1:]
+        raw_args = raw_tokens[idx + 1:] if len(raw_tokens) == len(mask_tokens) else args
 
-    if first == "find" and "-maxdepth" not in args:
-        return "find without -maxdepth is refused: add -maxdepth N (unbounded walk, incident 10.03.2026)"
+        if word == "find":
+            if "-maxdepth" not in args:
+                return "find without -maxdepth is refused: add -maxdepth N (unbounded walk, incident 10.03.2026)"
 
-    if first in ("pkill", "pgrep"):
-        full_match = "f" in _short_flags(args) or "--full" in args
-        bracket_pattern = any(tok.lstrip("\"'").startswith("[") for tok in args)
-        if full_match and not bracket_pattern:
-            return (f"{first} -f is refused: it matches its own command line (incident 04.10.2026); "
-                    "use a '[r]un-x' style pattern or kill by PID")
+        elif word in ("pkill", "pgrep"):
+            full_match = "f" in _short_flags(args) or any(_long_opt(a, "--full") for a in args)
+            bracket_pattern = any(tok.lstrip("\"'").startswith("[") for tok in raw_args)
+            if full_match and not bracket_pattern:
+                return (f"{word} -f is refused: it matches its own command line (incident 04.10.2026); "
+                        "use a '[r]un-x' style pattern or kill by PID")
 
-    if first == "rm":
-        recursive = "r" in _short_flags(args).lower() or "--recursive" in args
-        if recursive:
-            for tok in args:
-                if tok.startswith("-"):
-                    continue
-                path = tok.strip("\"'")
-                if path.endswith("/*"):
-                    path = path[:-2] or "/"
-                path = path.rstrip("/") or "/"
-                if path in _PROTECTED_RM_TARGETS:
-                    return f"rm -r on {path} is refused regardless of confirmation"
+        elif word == "rm":
+            recursive = "r" in _short_flags(args).lower() or any(_long_opt(a, "--recursive") for a in args)
+            if recursive:
+                after_dashdash = False
+                for tok in raw_args:
+                    if tok == "--":
+                        after_dashdash = True
+                        continue
+                    if tok.startswith("-") and not after_dashdash:
+                        continue
+                    reason = _rm_target_reason(tok)
+                    if reason:
+                        return reason
     return None
 
 

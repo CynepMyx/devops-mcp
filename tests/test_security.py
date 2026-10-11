@@ -416,17 +416,42 @@ class TestHardDeny:
         "find / -name '*.log'",
         "find /var/www -name '*.php' -mtime -1",
         "sudo find /home -type f",
+        "sudo -u www-data find /var/www -name x",
+        "nice -n 10 find /var -type f",
+        "timeout 5 find / -name x",
+        "ionice -c3 nice -n 19 find /srv -newer x",
+        "/usr/bin/find /opt -name x",
+        "busybox find /tmp -type f",
+        "xargs find /var -name",
         "ls /tmp && find /opt -name x",
         "pkill -f run-all61b.sh",
         "pgrep -f 'run-all'",
         "sudo pkill -9 -f gunicorn",
         "pkill --full worker",
+        "pgrep --fu worker",
+        "/usr/bin/pkill -f celery",
         "rm -rf /",
         "rm -rf /*",
         "rm -r /etc",
+        "rm --recurs /etc",
+        "rm --recursive --force /home",
         "sudo rm -rf /var/lib/",
         "rm -Rf /home",
         "cd /tmp; rm -rf /opt",
+        "rm -rf //etc/",
+        "rm -rf /etc/.",
+        "rm -rf /var/www/../..",
+        "rm -rf /et?",
+        "rm -rf /{etc,var}",
+        "rm -rf /var/l*",
+        "rm -rf ~",
+        "rm -rf ~/",
+        "rm -rf $HOME",
+        "rm -rf .",
+        "rm -rf ..",
+        "rm -rf ../../etc",
+        "rm -rf -- /etc",
+        "/bin/rm -rf /usr",
     ])
     def test_refused_even_when_confirmed(self, cmd):
         with pytest.raises(PermissionError, match="Refused"):
@@ -437,6 +462,8 @@ class TestHardDeny:
     @pytest.mark.parametrize("cmd", [
         "find /var/log -maxdepth 2 -name '*.log'",
         "find /opt/app -maxdepth 3 -type f | head -20",
+        "sudo -u www-data find /var/www -maxdepth 2 -name x",
+        "nice -n 10 find /var -maxdepth 1 -type f",
         "pkill -f '[r]un-all61b'",
         "pgrep -f \"[g]unicorn\"",
         "pkill nginx",
@@ -444,14 +471,22 @@ class TestHardDeny:
         "kill -9 12345",
         "rm -rf /tmp/build",
         "rm -r /var/www/html/old-release",
+        "rm -rf /var/www/old*",
+        "rm -rf /opt/app/releases/2026-*",
         "rm /etc/nginx/sites-enabled/old.conf",
         "rm -f /var/log/app.log.1",
+        "rm -rf old-release",
         "grep -rn 'find /' /opt/app/scripts",
+        "grep -n \"pkill -f\" /opt/app/run.sh",
+        "docker run --rm alpine ls",
+        "findmnt /",
+        "cat /etc/alarm.conf",
     ])
     def test_safe_forms_pass_hard_deny(self, cmd):
         for sc in cmd.split("|"):
             assert hard_deny_reason(sc) is None, sc
 
-    def test_strip_sudo_user_option(self):
-        assert hard_deny_reason("sudo -u www-data find /var/www -name x") is not None
-        assert hard_deny_reason("sudo -u www-data find /var/www -maxdepth 2 -name x") is None
+    def test_word_outside_quotes_counts_even_as_data(self):
+        # Documented trade-off: the bare word is refused, the quoted one passes.
+        assert hard_deny_reason("echo find") is not None
+        assert hard_deny_reason("echo 'find'") is None
