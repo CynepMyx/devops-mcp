@@ -195,7 +195,8 @@ def dpkg_safe(t):
 
 _JOURNALCTL_ACTIONS = ("rotate", "vacuum-size", "vacuum-files", "vacuum-time", "flush", "sync",
                        "relinquish-var", "smart-relinquish-var", "setup-keys", "update-catalog",
-                       "cursor-file")  # writes the last cursor into the file it names
+                       "cursor-file",  # writes the last cursor into the file it names
+                       "image")  # mounts a disk image
 
 
 def journalctl_safe(t):
@@ -262,7 +263,7 @@ _CURL_VALUE_LONG = {"proxy", "preproxy", "socks4", "socks4a", "socks5", "socks5-
                     "oauth2-bearer", "noproxy", "proxy-user", "ciphers", "tls13-ciphers", "curves",
                     "cookie", "expect100-timeout", "keepalive-time", "dns-servers", "local-port",
                     "speed-limit", "speed-time", "max-filesize", "max-redirs", "tls-max", "proto",
-                    "proto-redir", "happy-eyeballs-timeout-ms", "ip-tos", "time-cond", "url-query",
+                    "happy-eyeballs-timeout-ms", "ip-tos", "time-cond", "url-query",
                     "aws-sigv4", "pinnedpubkey", "proxy-cacert", "proxy-header"}
 _CURL_FLAG_LONG = {"silent", "show-error", "fail", "fail-with-body", "fail-early", "location",
                    "location-trusted", "insecure", "head", "include", "show-headers", "verbose",
@@ -278,6 +279,20 @@ _CURL_FLAG_LONG = {"silent", "show-error", "fail", "fail-with-body", "fail-early
 # With no scheme curl picks the protocol from the host name: 'dict.x:6379/info' is DICT,
 # and '--resolve dict.x:6379:127.0.0.1' points it at a local redis (curl 8.10, stand).
 _CURL_GUESSED_HOSTS = ("ftp.", "dict.", "ldap.", "imap.", "smtp.", "pop3.")
+
+
+def _curl_value_ok(name: str, val: str) -> bool:
+    # '@FILE' sends a local file: '-H @/etc/shadow' puts its lines into headers for any
+    # host, '--url-query a@FILE' into the query string, and a '-b' value without '='
+    # names a cookie file. '--proto-redir' is not allowed at all: with -L it lets a
+    # remote redirect reach dict:// or gopher:// on the server itself.
+    if name in ("header", "proxy-header") and val.startswith("@"):
+        return False
+    if name == "url-query" and "@" in val:
+        return False
+    if name == "cookie" and "=" not in val:
+        return False
+    return True
 
 
 def _curl_target_ok(tok: str) -> bool:
@@ -322,7 +337,9 @@ def curl_safe(t):
                     return False
             elif name in _CURL_VALUE_LONG:
                 if not has_val:
-                    i += 1
+                    val, i = _value(t, i, "")
+                if not _curl_value_ok(name, val):
+                    return False
             elif not (name in _CURL_FLAG_LONG or (name.startswith("no-") and name[3:] in _CURL_FLAG_LONG)):
                 return False  # unknown, abbreviated or '--expand-...': ask
         elif tok.startswith("-") and len(tok) > 1:
@@ -337,6 +354,8 @@ def curl_safe(t):
                     if ch == "X" and val.upper() not in ("GET", "HEAD"):
                         return False
                     if ch == "w" and not _curl_write_out_safe(val):
+                        return False
+                    if ch in "Hb" and not _curl_value_ok("header" if ch == "H" else "cookie", val):
                         return False
                     break
         elif not _curl_target_ok(tok):

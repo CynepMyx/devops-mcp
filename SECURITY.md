@@ -43,6 +43,7 @@ can enforce that prompt by protocol instead of by convention.
 - **Commands keep running after a timeout** — the reply says so; without a pty there is no reliable way to stop the remote process
 
 **Not handled yet:**
+- **Sending data out through DNS tools** — `dig -f FILE` and `nslookup` reading stdin turn each line of a file into a query to a server of the caller's choice, without confirmation. curl's ways to send a local file ask
 - **State prepared beforehand** — a file named `-i` in the working directory turns `sed p *` into an in-place edit, a repository's own `.git/config` can name programs that `git status` runs, and a config under test can load code (`lua-load` in haproxy). Each needs a write first, and writes ask
 - **Recursive walks from `/`** — `du`, `grep -r` and the like pass the validator and keep running on the server after a timeout, which on a large disk is real load. Blocking them outright would cut a useful tool, so the fix is still being worked out: a disk overview of the remote host first (usage and inodes per filesystem), then walks only into the directories it points to. Until then the operator picks the narrowest command for the server at hand
 
