@@ -1,15 +1,21 @@
-FROM python:3.12-slim-bookworm
-
-ARG DOCKER_GID=999
+# Two stages: gcc is needed only to build wheels, the final image does not carry it.
+FROM python:3.12-slim-trixie AS build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
-
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+
+FROM python:3.12-slim-trixie
+
+ARG DOCKER_GID=999
+
+COPY --from=build /install /usr/local
+
+WORKDIR /app
 
 COPY . .
 

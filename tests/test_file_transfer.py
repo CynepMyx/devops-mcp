@@ -113,6 +113,18 @@ def test_oversized_content_is_refused():
     "systemd-analyze verify /etc/systemd/system/backup.service",
     "docker compose config",
     "python3 -m json.tool /etc/app/config.json",
+    "postconf -n",
+    "postconf myhostname",
+    "php-fpm8.2 -t",
+    "php-fpm8.2 -tt -y /etc/php/8.2/fpm/php-fpm.conf",
+    "yq . /etc/app.yaml",
+    "wp config get DB_NAME --path=/var/www/site",
+    "nginx -T",
+    "nginx -t -q",
+    "sshd -t -f /etc/ssh/sshd_config",
+    "named-checkzone example.com /etc/bind/db.example",
+    "iptables-restore -t /etc/iptables/rules.v4",
+    "visudo -c -f /etc/sudoers.d/90-app",
 ])
 def test_config_tests_are_allowed(command):
     validate_verify_command(command)
@@ -127,6 +139,32 @@ def test_config_tests_are_allowed(command):
     "nginx -t > /tmp/out",
     "echo $(cat /etc/shadow)",
     "",
+    # passed the prefix check and acted (audit 12.10.2026)
+    "postconf -e relayhost=[evil.example]:25",
+    "postconf -X smtpd_tls_cert_file",
+    "php-fpm8.2 -y /tmp/evil-fpm.conf -R",
+    "php-fpm7.4 --fpm-config /tmp/x.conf",
+    "python3 -m json.tool /tmp/a.json /etc/hosts",
+    "yq -i .a=1 /etc/app.yaml",
+    "wp config get DB_NAME --exec=\"file_put_contents('/tmp/pwn','x');\"",
+    "wp config get DB_NAME --require=/tmp/x.php",
+    "nginx -t -g 'load_module /tmp/x.so;'",
+    # third pass (12.10.2026): each loads a module, runs a program or writes a file
+    "nginx -t -c /tmp/x.conf",
+    "nginx -t -e /tmp/err.log",
+    "apachectl -t -C 'LoadModule x /tmp/x.so'",
+    "httpd -t -f /tmp/x.conf",
+    "php-fpm8.2 -t -d extension=/tmp/x.so",
+    "docker compose config -o /tmp/x",
+    "docker-compose config --output /tmp/x",
+    "iptables-restore -t -M /tmp/x /etc/iptables/rules.v4",
+    "named-checkzone -o /tmp/x example.com /etc/bind/db.example",
+    "visudo -c -x /tmp/x",
+    "yq -s '.a' /etc/app.yaml",
+    "sshd -t -E /tmp/x",
+    "php -l -r 'echo 1;'",
+    "nginx -t ${X:--g}",
+    "nginx -t {-c,/tmp/x.conf}",
 ])
 def test_non_test_commands_are_refused(command):
     with pytest.raises((ValueError, PermissionError)):
@@ -226,13 +264,41 @@ class _FakeFile:
         pass
 
 
-class _FakeSftp:
-    """Just enough SFTP to let file_put run against a dict."""
+class _FakeDirStat:
+    st_mode = 0o040755
 
-    def __init__(self, store):
+
+class _FakeSftp:
+    """Just enough SFTP to let file_put run against a dict.
+
+    links maps a symlink to its target (normalize resolves it, like the server);
+    dirs holds directories that exist; deny_mkdir lists paths mkdir must refuse."""
+
+    def __init__(self, store, links=None, dirs=None, deny_mkdir=()):
         self.store = store
+        self.links = links or {}
+        self.dirs = dirs if dirs is not None else {"/", "/var", "/var/backups", "/etc", "/home",
+                                                   "/home/oleg"}
+        self.deny_mkdir = set(deny_mkdir)
+        self.made = {}
+
+    def normalize(self, path):
+        if path == ".":
+            return "/home/oleg"
+        path = self.links.get(path, path)
+        if path in self.store or path in self.dirs:
+            return path
+        raise FileNotFoundError(path)
+
+    def mkdir(self, path, mode=0o777):
+        if path in self.deny_mkdir:
+            raise PermissionError(13, "Permission denied", path)
+        self.dirs.add(path)
+        self.made[path] = mode
 
     def stat(self, path):
+        if path in self.dirs:
+            return _FakeDirStat()
         if path not in self.store:
             raise FileNotFoundError(path)
         st = _FakeStat()
@@ -259,17 +325,17 @@ class _FakeSftp:
 
 
 class _FakeClient:
-    def __init__(self, store, counter):
-        self.store, self.counter = store, counter
+    def __init__(self, store, counter, sftp=None):
+        self.store, self.counter, self.sftp = store, counter, sftp
 
     def open_sftp(self):
         self.counter["passes"] += 1
-        return _FakeSftp(self.store)
+        return self.sftp or _FakeSftp(self.store)
 
 
 class _FakeEntry:
-    def __init__(self, store, counter):
-        self.client = _FakeClient(store, counter)
+    def __init__(self, store, counter, sftp=None):
+        self.client = _FakeClient(store, counter, sftp)
         self.host_key = {"mode": "warn"}
         self.lock = threading.Lock()
 
@@ -321,3 +387,87 @@ def test_password_auth_is_off_by_default():
                            "password": "hunter2", "path": "/etc/hosts"}))
     assert result["outcome"] == "refused"
     assert "ALLOW_SSH_PASSWORD" in result["error"]
+
+
+# --- where the copy goes, and symlinks ----------------------------------------
+
+def _use_fake(monkeypatch, sftp):
+    from tools import ssh_pool
+    counter = {"passes": 0}
+    monkeypatch.setattr(ssh_pool, "acquire",
+                        lambda *a, **kw: (_FakeEntry(sftp.store, counter, sftp), True))
+    monkeypatch.setattr(ssh_pool, "drop", lambda entry: None)
+    monkeypatch.setattr(ssh_pool, "touch", lambda entry: None)
+
+
+def test_the_copy_leaves_the_directory_a_service_reads_whole(monkeypatch):
+    """nginx loads sites-enabled/*: a copy next to the file became a second config,
+    and with an upstream block 'nginx -t' failed on the duplicate (audit 12.10.2026)."""
+    store = {"/etc/nginx/sites-enabled/app.conf": b"old"}
+    sftp = _FakeSftp(store, dirs={"/", "/var", "/var/backups", "/etc", "/etc/nginx",
+                                  "/etc/nginx/sites-enabled", "/home", "/home/oleg"})
+    _use_fake(monkeypatch, sftp)
+    result = run(file_put({**HOST, "path": "/etc/nginx/sites-enabled/app.conf",
+                           "content": "new", "confirmed": True}))
+    assert result["backup"].startswith("/var/backups/oleg/etc/nginx/sites-enabled/app.conf.bak_")
+    assert store[result["backup"]] == b"old"
+    assert [p for p in store if p.startswith("/etc/nginx/sites-enabled/")] == [
+        "/etc/nginx/sites-enabled/app.conf"]
+    assert store["/etc/nginx/sites-enabled/app.conf"] == b"new"
+    assert sftp.made and all(mode == 0o700 for mode in sftp.made.values())
+
+
+def test_without_rights_on_var_backups_the_copy_goes_home(monkeypatch):
+    store = {"/etc/app/config.json": b"old"}
+    sftp = _FakeSftp(store, dirs={"/", "/var", "/var/backups", "/etc", "/etc/app", "/home",
+                                  "/home/oleg"}, deny_mkdir={"/var/backups/oleg"})
+    _use_fake(monkeypatch, sftp)
+    result = run(file_put({**HOST, "path": "/etc/app/config.json", "content": "new",
+                           "confirmed": True}))
+    assert result["backup"].startswith("/home/oleg/backups/etc/app/config.json.bak_")
+
+
+def test_a_symlinked_config_is_written_through_the_link(monkeypatch):
+    """Rename over a symlink replaces the link: sites-enabled got a detached copy and
+    sites-available kept the old version (audit 12.10.2026)."""
+    store = {"/etc/nginx/sites-available/app.conf": b"old"}
+    sftp = _FakeSftp(store, links={"/etc/nginx/sites-enabled/app.conf":
+                                   "/etc/nginx/sites-available/app.conf"},
+                     dirs={"/", "/var", "/var/backups", "/etc", "/etc/nginx",
+                           "/etc/nginx/sites-available", "/etc/nginx/sites-enabled", "/home",
+                           "/home/oleg"})
+    _use_fake(monkeypatch, sftp)
+    result = run(file_put({**HOST, "path": "/etc/nginx/sites-enabled/app.conf",
+                           "content": "new", "confirmed": True}))
+    assert result["resolved_path"] == "/etc/nginx/sites-available/app.conf"
+    assert store["/etc/nginx/sites-available/app.conf"] == b"new"
+    assert "/etc/nginx/sites-enabled/app.conf" not in store
+
+
+def test_a_link_to_a_denied_file_is_refused(monkeypatch):
+    store = {"/root/.ssh/id_rsa": b"-----BEGIN KEY-----"}
+    sftp = _FakeSftp(store, links={"/tmp/notes.txt": "/root/.ssh/id_rsa"})
+    _use_fake(monkeypatch, sftp)
+    got = run(file_get({**HOST, "path": "/tmp/notes.txt"}))
+    assert got.get("outcome") == "refused" and "id_rsa" in got["error"]
+    put = run(file_put({**HOST, "path": "/tmp/notes.txt", "content": "x", "confirmed": True}))
+    assert put.get("outcome") == "refused"
+    assert store["/root/.ssh/id_rsa"] == b"-----BEGIN KEY-----"
+
+
+def test_the_temporary_file_does_not_name_the_tool(monkeypatch):
+    seen = []
+    store = {"/etc/app/config.json": b"old"}
+    sftp = _FakeSftp(store, dirs={"/", "/var", "/var/backups", "/etc", "/etc/app", "/home",
+                                  "/home/oleg"})
+    original = sftp.open
+
+    def spy(path, mode="r"):
+        seen.append(path)
+        return original(path, mode)
+
+    sftp.open = spy
+    _use_fake(monkeypatch, sftp)
+    run(file_put({**HOST, "path": "/etc/app/config.json", "content": "new", "confirmed": True}))
+    tmp = [p for p in seen if ".tmp_" in p]
+    assert tmp and not any("mcp" in p for p in seen)

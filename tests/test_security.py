@@ -65,8 +65,6 @@ class TestSshCommandConditionallyAllowlisted:
         "curl http://localhost:8080/health",
         "curl -s http://localhost/metrics",
         "curl -v https://example.com",
-        # wget: read-only
-        "wget http://localhost/check",
         # find: no -exec/-delete
         "find /var/log -name '*.log' -maxdepth 2",
         "find /tmp -maxdepth 3 -type f -mtime +7",
@@ -85,6 +83,7 @@ class TestSshCommandConditionallyAllowlisted:
         "curl -o /tmp/output http://x/",
         "curl --output /tmp/out http://x/",
         # wget: state-mutating
+        "wget http://localhost/check",  # writes ./check: wget always saves a file
         "wget --post-data=x http://x/",
         "wget -O /tmp/file http://x/",
         "wget --output-document=/tmp/x http://x/",
@@ -254,7 +253,6 @@ class TestGitGlobalOptions:
         "git --git-dir=/srv/app/.git status",
         "git --git-dir /srv/app/.git log",
         "git --no-pager diff --stat",
-        "git -c core.pager=cat log -5",
         "git -C /srv/app --no-pager show HEAD",
         "cd /opt/devops-mcp && git log --oneline -1",
     ])
@@ -265,6 +263,8 @@ class TestGitGlobalOptions:
         "git -C /srv/app push origin main",
         "git --git-dir=/srv/app/.git reset --hard HEAD~1",
         "git -c user.email=x@y.z commit -am wip",
+        # -c can name a program (core.fsmonitor, diff.external), so any -c asks; unused in the audit log
+        "git -c core.pager=cat log -5",
         "git --no-pager clean -fd",
         "cd /srv/app && rm -rf node_modules",
     ])

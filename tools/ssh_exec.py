@@ -20,6 +20,18 @@ ALLOW_SSH_PASSWORD = os.environ.get("ALLOW_SSH_PASSWORD", "false").lower() == "t
 
 logger = logging.getLogger(__name__)
 
+# One allowlisted read of a big log ('cat access.log' on a node with thousands of
+# sites) used to be read whole into memory, and the 256M container was killed by
+# the OOM killer (reproduced in the audit, 12.10.2026). Past this the rest is not
+# read: the channel is closed, the command gets SIGPIPE on its next write, and the
+# reply says the output was cut.
+MAX_OUTPUT_BYTES = 1024 * 1024
+
+
+def _read_capped(stream, limit: int) -> tuple[bytes, bool]:
+    data = stream.read(limit + 1)
+    return data[:limit], len(data) > limit
+
 
 def _run_ssh(
     host: str,
@@ -54,9 +66,15 @@ def _run_ssh(
                 # command that reads stdin ('grep' without a file, 'cat', 'read')
                 # gets EOF instead of waiting out the timeout.
                 stdin.channel.shutdown_write()
-                out = stdout.read().decode(errors="replace")
-                err = stderr.read().decode(errors="replace")
-                exit_code = stdout.channel.recv_exit_status()
+                out_b, out_cut = _read_capped(stdout, MAX_OUTPUT_BYTES)
+                err_b, err_cut = (b"", False) if out_cut else _read_capped(stderr, MAX_OUTPUT_BYTES)
+                if out_cut or err_cut:
+                    stdout.channel.close()  # exit status would wait for the command to finish
+                    exit_code = None
+                else:
+                    exit_code = stdout.channel.recv_exit_status()
+                out = out_b.decode(errors="replace")
+                err = err_b.decode(errors="replace")
                 ssh_pool.touch(entry)
             break
         except socket.timeout:
@@ -92,6 +110,10 @@ def _run_ssh(
         "connection": "reused" if reused else "new",
         "host_key": entry.host_key,
     }
+    if out_cut or err_cut:
+        result["truncated"] = True
+        result["note"] = (f"Output cut at {MAX_OUTPUT_BYTES // 1024} KiB and the channel closed; "
+                          "narrow the command (head, grep, tail -n) to see the rest.")
     return result
 
 
@@ -101,7 +123,7 @@ async def ssh_exec(args: dict) -> dict:
     key_path = args.get("key", "").strip()
     password = args.get("password", "").strip()
     command = args.get("command", "").strip()
-    timeout = min(int(args.get("timeout", 30)), 120)
+    timeout = max(1, min(int(args.get("timeout", 30)), 120))
     confirmed = bool(args.get("confirmed", False))
     strict = strict_host_key_default()
     verify_host_key = bool(args.get("verify_host_key", strict))

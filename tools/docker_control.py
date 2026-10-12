@@ -18,6 +18,11 @@ def _control(action: str, name: str) -> dict:
     client = docker.from_env(timeout=10)
     try:
         container = client.containers.get(name)
+        # Docker also resolves '/devops-mcp' and an ID prefix to the same container,
+        # so the check has to use the name it resolved to (audit 12.10.2026).
+        if container.name.lstrip("/") in PROTECTED:
+            return {"error": f"Container '{container.name}' is protected and cannot be controlled",
+                    "outcome": "refused"}
         if action == "restart":
             container.restart(timeout=30)
         elif action == "stop":
