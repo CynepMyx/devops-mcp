@@ -148,8 +148,19 @@ def tree_safe(t):
 
 
 def ping_safe(t):
-    # -f floods.
-    return _flags_only(t, "ciIlmMpQsStTwWF", "f")
+    # -f floods, and so do -l (preload) and -i below 0.2 s as root.
+    if not _flags_only(t, "ciIlmMpQsStTwWF", "fl", unsafe_long=("flood", "preload")):
+        return False
+    for i, tok in enumerate(t):
+        if tok.startswith("-") and not tok.startswith("--") and "i" in tok[1:]:
+            j = tok.index("i")
+            val = tok[j + 1:] or (t[i + 1] if i + 1 < len(t) else "")
+            try:
+                if float(val) < 0.2:
+                    return False
+            except ValueError:
+                return False
+    return True
 
 
 def file_safe(t):
@@ -239,7 +250,7 @@ def ip_safe(t):
 _CURL_VALUE_SHORT = set("AbcCdDeEFHKmoPQrtTuUwxXyYz")
 _CURL_UNSAFE_SHORT = set("dFTKcOQ")  # data, form, upload, config, cookie jar, remote name, ftp quote
 _CURL_SINKS = ("/dev/null", "-")
-_CURL_HTTP_URL = re.compile(r"^https?://", re.I)
+_CURL_HTTP_URL = re.compile(r"^https?:/", re.I)
 # Long options are checked against what is known to be a read, not against a list of
 # writes: curl 8.3+ takes '--expand-<any option>', 8.12 added '--ssl-sessions FILE', and
 # curl 7.x takes any unambiguous prefix ('--max-ti'). Each of those was a way around a
@@ -273,7 +284,8 @@ def _curl_target_ok(tok: str) -> bool:
     # dict:// and gopher:// send raw bytes to local services (redis FLUSHALL), and a
     # glob like '{dict,http}://' hides the scheme: only http(s), or no scheme with a
     # host curl will not read as another protocol and no glob that could build one.
-    if "://" in tok:
+    if ":/" in tok:
+        # curl 8.10 also reads 'dict:/127.0.0.1:6379' (one slash) as DICT
         return bool(_CURL_HTTP_URL.match(tok))
     host = tok.split("/", 1)[0].rsplit("@", 1)[-1].lower()
     return not host.startswith(_CURL_GUESSED_HOSTS) and not any(ch in tok for ch in "{[")

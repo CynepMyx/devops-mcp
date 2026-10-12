@@ -158,6 +158,9 @@ def test_statements_hidden_behind_a_comment_marker_are_refused(query):
     "SELECT 1 /*! INTO OUTFILE '/var/lib/mysql-files/x' */",  # MySQL runs /*! */
     "SELECT 1--1 INTO DUMPFILE '/tmp/x'",
     "SELECT 1 INTO/**/OUTFILE '/tmp/x'",
+    "SELECT 1 INTO/*! */ /*!OUTFILE*/ '/tmp/x'",
+    "SELECT 1 INTO/*!50000 OUTFILE*/ '/tmp/x'",
+    "SELECT pg_file_write('/tmp/x', 'y', false)",
 ])
 def test_file_writes_hidden_from_the_stripper_are_refused(query):
     from security import validate_db_query

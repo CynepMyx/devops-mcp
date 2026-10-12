@@ -374,7 +374,7 @@ def is_read_only_command(command: str) -> bool:
     """
     try:
         mask, has_substitution = _mask_quotes(command)
-        if has_substitution or _writes_to_file(mask):
+        if has_substitution or _writes_to_file(mask, command):
             return False
         return all(_is_subcommand_safe(sc) for sc in _split_shell_commands(command)
                    if sc.strip())
@@ -456,13 +456,19 @@ def _blank_harmless_redirects(mask: str) -> str:
     return _HARMLESS_REDIRECT_RE.sub(lambda m: ' ' * len(m.group(0)), mask)
 
 
-def _writes_to_file(mask: str) -> bool:
+def _writes_to_file(mask: str, command: str | None = None) -> bool:
     """True when the command redirects output into a file.
 
     The harmless forms are blanked out first, so whatever redirect is left has
     a real target. Takes the quote mask, so an angle bracket inside quoted data
-    was already replaced and cannot reach here.
+    was already replaced and cannot reach here. The mask turns a quote into a
+    space, so with the command at hand a quote or backslash right after the target
+    counts as a write: "2>/dev/null'x'" is /dev/nullx to bash (created on the stand).
     """
+    if command is not None:
+        for m in _HARMLESS_REDIRECT_RE.finditer(mask):
+            if command[m.end():m.end() + 1] in ("'", '"', "\\"):
+                return True
     return bool(re.search(r'>{1,2}\s*\S', _blank_harmless_redirects(mask)))
 
 
@@ -764,7 +770,7 @@ def validate_ssh_command(command: str, confirmed: bool) -> None:
     # or a ';' in an nginx directive are data, not syntax. Merging descriptors
     # and discarding output stay allowed: neither creates nor truncates a file,
     # and banning them only taught us to write '| wc -c' instead of '2>/dev/null'.
-    if _writes_to_file(mask):
+    if _writes_to_file(mask, command):
         raise ValueError("Output redirection to a file is not allowed")
 
     sub_commands = _split_shell_commands(command)
@@ -1026,7 +1032,7 @@ _DB_PRIV_PATTERNS = re.compile(
 
 _DB_DANGER_PATTERNS = re.compile(
     r'\b(INTO\s+(OUT|DUMP)FILE|LOAD_FILE|lo_import|lo_export|'
-    r'pg_read_file|pg_write_file|COPY\b)', re.IGNORECASE
+    r'pg_read_file|pg_write_file|pg_file_(?:write|rename|unlink)|COPY\b)', re.IGNORECASE
 )
 
 
@@ -1063,7 +1069,7 @@ def _sql_views(query: str) -> tuple[str, str, str]:
     allows several statements (third pass, 12.10.2026, reproduced on mysql:8.0).
     Every check runs on the stripped query, the raw one and one with comment and quote
     marks blanked, so nothing a server executes is hidden from them."""
-    flat = re.sub(r"/\*|\*/|--|#|['\"`]", " ", query)
+    flat = re.sub(r"/\*M?!\d*|/\*|\*/|--|#|['\"`]", " ", query)
     return _strip_sql_comments(query), query, flat
 
 

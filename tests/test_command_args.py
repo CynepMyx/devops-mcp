@@ -190,6 +190,13 @@ NEEDS_CONFIRMATION = [
     "curl --proto-d dict 127.0.0.1:6379/info",
     "curl -s '{dict,www}.x:6379/info'",
     "curl -H 'X: a\nFLUSHALL' http://x/",
+    "curl -s dict:/127.0.0.1:6379/info",     # one slash: still DICT with curl 8.10
+    "curl -s DICT:/127.0.0.1:6379/info",
+    "uptime 2>/dev/null'x'",                 # created /dev/nullx on the stand
+    "uptime 2>/dev/null\\y",
+    "ping -i 0 10.0.0.1",
+    "ping -i0.01 10.0.0.1",
+    "ping -l 1000 10.0.0.1",
 ]
 
 READS = [
@@ -301,6 +308,8 @@ READS = [
     "curl -s --no-progress-meter http://x/",
     "curl -s example.com/dictionary",
     "sed -n '$p' /etc/hostname",
+    "ping -c 3 -i 0.5 10.0.0.1",
+    "curl -s http:/x/",
     "find $HOME/www -maxdepth 2 -type f -name '*.zip'",
     "find ${HOME}/www -maxdepth 1",
     'docker inspect x --format "{{range $k,$v := .Config.Labels}}{{$k}} {{end}}"',
