@@ -7,6 +7,13 @@ character ceiling. SFTP has no such problem: the bytes travel as bytes.
 file_put is deliberately conservative about the file it replaces. It keeps the
 existing mode and owner, writes to a temporary file in the same directory and
 renames it into place, so a reader never sees a half-written config.
+
+Both tools work on the real path. SFTP follows a symlink on read but replaces the
+link itself on rename, so a name-based deny-list could be walked around through a
+link, and a symlinked config in sites-enabled turned into a detached copy (audit
+12.10.2026). The copy of the old content goes to /var/backups/oleg/<full path>,
+outside every directory a service reads whole: nginx loads sites-enabled/*, and
+a copy next to the file became a second config.
 """
 import asyncio
 import difflib
@@ -34,6 +41,12 @@ from tools import ssh_pool
 ALLOW_SSH_PASSWORD = os.environ.get("ALLOW_SSH_PASSWORD", "false").lower() == "true"
 
 MAX_DIFF_LINES = 200
+
+# Where file_put keeps the previous content. Directories it creates are 0700:
+# configs carry database passwords. Without rights on /var/backups the copy goes
+# to ~/backups/ of the SSH user. Names say nothing about the tool on purpose.
+BACKUP_ROOT = "/var/backups/oleg"
+HOME_BACKUP_DIR = "backups"
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +97,7 @@ def _common_args(args: dict) -> tuple:
     user = args.get("user", "").strip()
     key_path = args.get("key", "").strip()
     password = args.get("password", "").strip()
-    timeout = min(int(args.get("timeout", 30)), 120)
+    timeout = max(1, min(int(args.get("timeout", 30)), 120))
     strict = strict_host_key_default()
     verify_host_key = bool(args.get("verify_host_key", strict))
 
@@ -133,24 +146,51 @@ def _decode(data: bytes) -> tuple[str | None, str | None]:
         return None, "not valid UTF-8"
 
 
+def _real_path(sftp, path: str) -> str:
+    """Where the path really leads, symlinks resolved on the server. For a file that
+    does not exist yet, the parent is resolved and the name kept."""
+    try:
+        return sftp.normalize(path)
+    except (IOError, OSError):
+        parent = sftp.normalize(posixpath.dirname(path) or "/")
+        return posixpath.join(parent, posixpath.basename(path))
+
+
+def _refuse_real_path(path: str, real: str) -> dict | None:
+    """The deny-list applies to where the link leads, not only to its name."""
+    if real == path:
+        return None
+    try:
+        validate_remote_file_path(real)
+    except (ValueError, PermissionError) as exc:
+        return {"error": f"{path} leads to {real}: {exc}", "outcome": "refused"}
+    return None
+
+
 def _get_sync(host, user, key_path, password, timeout, verify_host_key,
               path, max_bytes, jump=None) -> dict:
     def work(client, sftp):
-        st = sftp.stat(path)
+        real = _real_path(sftp, path)
+        refused = _refuse_real_path(path, real)
+        if refused:
+            return refused
+        st = sftp.stat(real)
         if stat_mod.S_ISDIR(st.st_mode):
             return {"error": f"Not a regular file: {path}", "outcome": "refused"}
-        data, truncated = _read_remote(sftp, path, max_bytes)
-        return st, data, truncated
+        data, truncated = _read_remote(sftp, real, max_bytes)
+        return st, data, truncated, real
 
     outcome, meta = _pooled(host, user, key_path, password, timeout,
                             verify_host_key, work, jump=jump)
     if isinstance(outcome, dict):
         return {**outcome, **meta}
-    st, data, truncated = outcome
+    st, data, truncated, real = outcome
 
     result = {"host": host, "path": path, **_describe(st),
               "sha256": hashlib.sha256(data).hexdigest(),
               "truncated": truncated, **meta}
+    if real != path:
+        result["resolved_path"] = real
     text, why_not = _decode(data)
     if text is None:
         result["content"] = None
@@ -158,6 +198,37 @@ def _get_sync(host, user, key_path, password, timeout, verify_host_key,
     else:
         result["content"] = text
     return result
+
+
+def _makedirs(sftp, path: str) -> None:
+    current = ""
+    for part in path.strip("/").split("/"):
+        current += "/" + part
+        try:
+            st = sftp.stat(current)
+        except (IOError, OSError) as exc:
+            if not isinstance(exc, FileNotFoundError) and getattr(exc, "errno", None) not in (
+                    None, errno.ENOENT):
+                raise
+            sftp.mkdir(current, mode=0o700)
+            continue
+        if not stat_mod.S_ISDIR(st.st_mode):
+            raise IOError(f"{current} exists and is not a directory")
+
+
+def _backup_path(sftp, real: str) -> str:
+    """A free name for the copy of `real` under /var/backups/oleg, or ~/backups."""
+    roots = [BACKUP_ROOT, posixpath.join(sftp.normalize("."), HOME_BACKUP_DIR)]
+    last_error = None
+    for root in roots:
+        directory = root + posixpath.dirname(real)
+        try:
+            _makedirs(sftp, directory)
+        except (IOError, OSError) as exc:
+            last_error = exc
+            continue
+        return _backup_name(sftp, posixpath.join(directory, posixpath.basename(real)))
+    raise IOError(f"No writable backup directory ({BACKUP_ROOT} or ~/{HOME_BACKUP_DIR}): {last_error}")
 
 
 def _backup_name(sftp, path: str) -> str:
@@ -191,7 +262,7 @@ def _write_atomic(sftp, path: str, payload: bytes, target_mode: int,
     """Write through a temporary file in the same directory, then rename over."""
     tmp_path = posixpath.join(
         posixpath.dirname(path) or "/",
-        f".{posixpath.basename(path)}.mcp_tmp_{os.getpid()}",
+        f".{posixpath.basename(path)}.tmp_{os.getpid()}",
     )
     with sftp.open(tmp_path, "wb") as fh:
         fh.write(payload)
@@ -222,6 +293,13 @@ def _put_sync(host, user, key_path, password, timeout, verify_host_key,
     progress: dict = {"stage": "not started", "backup": None}
 
     def work(client, sftp):
+        nonlocal path
+        given = path
+        real = _real_path(sftp, given)
+        refused = _refuse_real_path(given, real)
+        if refused:
+            return refused
+        path = real  # read, back up, write and roll back the file the link leads to
         try:
             st = sftp.stat(path)
             exists = True
@@ -270,7 +348,7 @@ def _put_sync(host, user, key_path, password, timeout, verify_host_key,
 
         summary = {
             "host": host,
-            "path": path,
+            "path": given,
             "exists": exists,
             "old_sha256": hashlib.sha256(old_bytes).hexdigest() if exists else None,
             "new_sha256": hashlib.sha256(payload).hexdigest(),
@@ -280,6 +358,8 @@ def _put_sync(host, user, key_path, password, timeout, verify_host_key,
         }
         if exists:
             summary["current"] = _describe(st)
+        if path != given:
+            summary["resolved_path"] = path
 
         if not diff_lines and exists and old_bytes == payload:
             summary["written"] = False
@@ -295,7 +375,7 @@ def _put_sync(host, user, key_path, password, timeout, verify_host_key,
 
         backup_path = None
         if exists and backup:
-            backup_path = _backup_name(sftp, path)
+            backup_path = _backup_path(sftp, path)
             with sftp.open(backup_path, "wb") as fh:
                 fh.write(old_bytes)
             sftp.chmod(backup_path, stat_mod.S_IMODE(st.st_mode))

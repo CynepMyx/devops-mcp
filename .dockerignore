@@ -1,0 +1,15 @@
+# The running container mounts the code, keys and known_hosts at runtime, so none
+# of this has to be baked in. Keys and .env in an image layer outlive their rotation:
+# every old image and every `docker save` still carries them.
+.git
+.github
+.env
+keys/
+ssh/
+tests/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.bak
+*.bak_*

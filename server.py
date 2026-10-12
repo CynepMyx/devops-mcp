@@ -13,6 +13,7 @@ from fastapi import FastAPI, Request
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import TextContent, Tool, ToolAnnotations
 import uvicorn
 
@@ -40,6 +41,17 @@ from tools import ssh_pool
 AUDIT_LOG_PATH = os.environ.get("AUDIT_LOG_PATH", "/audit/audit.jsonl")
 MCP_HOST = os.environ.get("MCP_HOST", "127.0.0.1")
 MCP_PORT = int(os.environ.get("MCP_PORT", "8765"))
+
+# DNS rebinding: a web page can point its own domain at 127.0.0.1 and talk to the
+# tunnel from the browser. Only requests addressed to a loopback name pass. The port
+# is left free, so moving the tunnel to another local port keeps working.
+ALLOWED_HOSTS = [h.strip() for h in os.environ.get(
+    "MCP_ALLOWED_HOSTS", "127.0.0.1:*,localhost:*,[::1]:*,127.0.0.1,localhost").split(",") if h.strip()]
+TRANSPORT_SECURITY = TransportSecuritySettings(
+    enable_dns_rebinding_protection=True,
+    allowed_hosts=ALLOWED_HOSTS,
+    allowed_origins=[f"http://{h}" for h in ALLOWED_HOSTS],
+)
 
 _TOOL_MODULES = [
     "tools.system_info", "tools.docker_list", "tools.docker_logs",
@@ -146,13 +158,14 @@ async def lifespan(_app):
 
 app = FastAPI(title="DevOps MCP Server", docs_url=None, redoc_url=None, lifespan=lifespan)
 mcp_server = Server("devops-mcp")
-transport = SseServerTransport("/messages/")
+transport = SseServerTransport("/messages/", security_settings=TRANSPORT_SECURITY)
 
 # Streamable HTTP on /mcp, stateless: each request carries everything it needs,
 # so restarting the container no longer leaves the client holding a dead session
 # id and answering -32602 to every call. SSE stays mounted on /sse for clients
 # that still speak it.
-session_manager = StreamableHTTPSessionManager(app=mcp_server, stateless=True)
+session_manager = StreamableHTTPSessionManager(
+    app=mcp_server, stateless=True, security_settings=TRANSPORT_SECURITY)
 
 # Annotations tell the client what a tool does before it runs, so "ask the user
 # first" stops depending on the model reading a description and deciding to care.
@@ -370,8 +383,9 @@ _TOOLS = [
             "Execute a command on a remote server via SSH. "
             "SSH commands are read-only by default: only safe commands (uptime, df, cat, grep, "
             "journalctl, systemctl status, docker ps, etc.) are allowed without confirmed=true. "
-            "Conditionally safe commands (sed, curl, wget, find) are allowed only without mutating "
-            "flags (e.g. sed -i, curl -X POST, find -exec require confirmed=true). "
+            "For sed, curl, git, ip, journalctl, dpkg, find and similar commands the flags are "
+            "parsed: a form that writes or executes (sed -i, curl -X POST, git -c, ip link set, "
+            "find -exec) requires confirmed=true; wget always does. "
             "All other commands require confirmed=true — always ask the user before setting it. "
             "Key must be located under /app/keys/. "
             "By default connects with warn policy (unknown hosts are allowed but reported). "
@@ -454,8 +468,10 @@ _TOOLS = [
         description=(
             "Write a file on a remote server over SFTP: no shell, no length limit, no "
             "quoting problems. Keeps the existing mode and owner, writes through a "
-            "temporary file in the same directory and renames it into place, and saves "
-            "path.bak_<timestamp> first. Run with dry_run=true to get the unified diff "
+            "temporary file in the same directory and renames it into place, and keeps the "
+            "previous content in /var/backups/oleg/<path>.bak_<timestamp> (or ~/backups/) "
+            "first. Symlinks are resolved: the file the link points to is the one written. "
+            "Run with dry_run=true to get the unified diff "
             "without touching anything; the actual write requires confirmed=true. "
             "A file that does not exist yet needs an explicit mode. "
             "Pass verify_cmd (a config test such as 'nginx -t') to have the new file "
@@ -472,7 +488,7 @@ _TOOLS = [
                 "path": {"type": "string", "description": "Absolute path of the file to write"},
                 "content": {"type": "string", "description": "Full new content of the file"},
                 "mode": {"type": "string", "description": "Octal mode for a new file, e.g. '0640'. Overrides the existing mode when given."},
-                "backup": {"type": "boolean", "description": "Save path.bak_<timestamp> before overwriting (default true)"},
+                "backup": {"type": "boolean", "description": "Keep the previous content in /var/backups/oleg/<path>.bak_<timestamp>, or ~/backups/ without rights there (default true)"},
                 "dry_run": {"type": "boolean", "description": "Return the diff without writing (default false)"},
                 "verify_cmd": {"type": "string", "description": "Config test to run after writing, e.g. 'nginx -t', 'apachectl configtest', 'php -l /path/file.php'. Must be a test command, not arbitrary shell."},
                 "rollback_on_failure": {"type": "boolean", "description": "Restore the previous content if verify_cmd exits non-zero (default true)"},

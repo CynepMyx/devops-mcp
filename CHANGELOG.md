@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.6.0] - 2026-10-12
+
+Security audit of the whole server: every finding below was reproduced on a stand (the image on the VPS, throwaway containers, real SFTP and databases) before it was fixed. The model is a personal MCP for one engineer; see SECURITY.md for what is left out on purpose and why.
+
+### Security
+- `ssh_exec` allowlist: flags and scripts are parsed per command instead of searched as substrings (`command_args.py`). Each of these passed without confirmation and acted: `command rm -rf ...` and `hash -p /bin/rm cat` (any command through a builtin), `git -c core.fsmonitor=...`, `git ls-remote --upload-pack=...`, `ext::` URLs and `git log --output=...`, `sed '1e ...'` and `sed -ni` (rewrote a three-line file to one line), `curl -XPOST` and `--json`, `curl -so FILE`, plain `wget`, `ip l s eth0 down` and `ip r d default` (abbreviations), `ip -b FILE`, `journalctl --rot`, plus mutating flags of commands that were listed as always safe (`ifconfig eth0 down`, `hostname x`, `date -s`, `dmesg -C`, `ss -K`, `sort -o`, `uniq in out`, `tree -o`, `ping -f`, `file -C`). Replayed against all 5 205 distinct commands in the audit log: no real read starts asking for confirmation, 34 that asked by mistake now pass (`-i` found inside `registry-infra`).
+- An adversarial pass over the new parser closed eight more ways through, each reproduced: a quoted `'>'` that swallowed the next word (`curl '>' -XPOST` to docker.sock, `sed -e p '>' -i`), GNU abbreviations `sed --e`, `sed --l N` and `date --s=`, `curl -w '%output{FILE}'` (curl 8.3+ writes the file), and `tree -R` (writes `00Tree.html` in every directory). Redirects are now removed where the quote mask sees them, never by the shape of a word. A later automated review added three more, also reproduced: a sed label ending at `;` (`sed ':a;e id'`), curl targets other than http(s) through `--url`, `--proto-default` or a glob in the scheme (`{dict,http}://`), and `ip -fam inet l s lo down` (an abbreviated value option shifted the parse). ip global options now come from an explicit list.
+- After a dropped connection only real reads are retried: the retry decision uses the same parser.
+- `pkill -f '[s]leep 300'` is refused when `sleep 300` appears elsewhere in the same command: the shell running it has the whole line in its argv, and on the stand this killed the ssh session.
+- HTTP transport accepts only `Host` 127.0.0.1/localhost and no foreign `Origin` (DNS rebinding from a browser through the SSH tunnel). `MCP_ALLOWED_HOSTS` overrides.
+- `db_query`: unconfirmed queries run in a read-only transaction (`WITH d AS (DELETE ...) SELECT` and `EXPLAIN ANALYZE DELETE` deleted rows on Postgres); `pg_terminate_backend` and friends need confirmation.
+- `file_get`/`file_put` resolve symlinks: a link to `id_rsa` no longer walks around the deny-list, and writing to a symlinked config updates its target instead of replacing the link with a detached copy.
+- `verify_cmd` arguments are checked per tool (`wp ... --exec` ran PHP, `python3 -m json.tool in out` overwrote `out`, `postconf -e` edited main.cf).
+- `docker_control` checks the protected list against the resolved container name (`/devops-mcp` went through).
+- The image no longer carries `keys/`, `ssh/`, `.env` and `.git` (no `.dockerignore`, `COPY . .` baked four private keys into every layer; the running container mounts them anyway).
+- Dependencies: `mcp` 1.27.0 → 1.28.1, `anyio` 4.13.0 → 4.14.2 (trivy: three HIGH, one CRITICAL).
+
+### Fixed
+- `db_query` on MySQL committed nothing: `aiomysql` opens with autocommit off and a confirmed `INSERT` reported success and vanished on close. No such write was ever made through the tool (checked in the audit log).
+- `ssh_exec` reads at most 1 MiB of output and says when it cut; `head -c 300000000 /dev/zero` OOM-killed the 256M container.
+- `file_put` keeps the previous content in `/var/backups/oleg/<path>.bak_<time>` (0700, `~/backups/` without rights) instead of next to the file, where nginx loaded it from `sites-enabled/*` (duplicate `upstream` broke `nginx -t`) and logrotate exited 1 on the duplicate rules. The temporary file no longer names the tool.
+- Timeouts below 1 second are raised to 1 (`0` gave `BlockingIOError`).
+
+### Changed
+- Base image `python:3.12-slim-trixie` (Debian 13: 44 HIGH and no CRITICAL against 55 HIGH and 2 CRITICAL), built in two stages so gcc stays out: 329 MB instead of 589 MB.
+- `git -c ...` and `wget ...` now always ask for confirmation; neither was used without it in the audit log.
+
 ## [0.5.3] - 2026-10-12
 
 ### Added

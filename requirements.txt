@@ -2,12 +2,12 @@
 # The image is rebuilt rarely, so an unpinned bump lands as a surprise during a
 # deploy — paramiko in particular is what every SSH and SFTP tool runs on.
 # To bump: change a line, deploy.sh, then check `docker exec devops-mcp pip freeze`.
-mcp==1.27.0
+mcp==1.28.1
 fastapi==0.136.1
 uvicorn[standard]==0.46.0
 psutil==7.2.2
 docker==7.1.0
-anyio==4.13.0
+anyio==4.14.2
 dbus-fast==4.0.4
 watchdog==6.0.0
 paramiko==4.0.0

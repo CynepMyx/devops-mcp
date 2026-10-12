@@ -40,7 +40,7 @@ Deploy it once on your server. Connect any MCP-compatible client.
 Security is built in, not bolted on:
 
 - **SSH commands are read-only by default** — only safe, read-only commands allowed without `confirmed=true` (uptime, df, cat, grep, journalctl, `systemctl status`, `docker ps`, etc.)
-- **Conditionally safe commands** — `sed`, `curl`, `wget`, `find` allowed only without mutating flags; `sed -i`, `curl -X POST`, `find -exec` require `confirmed=true`
+- **Flags are parsed, not searched** — for `sed`, `curl`, `git`, `ip`, `journalctl`, `dpkg`, `find` and others the words are parsed per command: `sed -ni`, `curl -XPOST`, `git -c`, `ip l s eth0 down`, `find -exec` require `confirmed=true`; `wget` always does (see SECURITY.md)
 - **Log path allowlist** — `log_tail` only reads from predefined safe paths
 - **Nginx container allowlist** — `nginx_test` only runs against approved container names
 - **docker_control requires confirmation** — `stop` and `restart` require `confirmed=true`; AI must ask user before proceeding
@@ -229,7 +229,10 @@ file_put(host="10.0.0.5", user="deploy", key="/app/keys/my-server.pem",
 ```
 
 The dry run returns a unified diff and writes nothing. Repeat with `confirmed=true` to
-apply it: the previous version is saved as `site.conf.bak_<timestamp>`, mode and owner
+apply it: the previous version is kept as `/var/backups/oleg/etc/nginx/conf.d/site.conf.bak_<timestamp>`
+(directories 0700; `~/backups/` when `/var/backups` is not writable), never next to the file,
+where nginx would load it as a second config from `conf.d/*.conf`. Symlinks are resolved, so a
+link in `sites-enabled` keeps pointing at the file that was updated. Mode and owner
 are carried over, and the new content lands via a temporary file in the same directory,
 so a reader never sees a half-written config. A file that does not exist yet needs an
 explicit `mode`, because guessing `0644` on a config is how secrets end up world-readable.

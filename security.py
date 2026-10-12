@@ -1,7 +1,10 @@
 import os
 import fnmatch
 import re
+import shlex
 from pathlib import Path, PurePosixPath
+
+import command_args
 
 KNOWN_HOSTS_PATH = os.environ.get("SSH_KNOWN_HOSTS", "/app/ssh/known_hosts")
 
@@ -84,45 +87,19 @@ _SAFE_SINGLE = frozenset({
     # Package and locale queries with no mutating form
     "dpkg-query", "apt-cache", "getent", "locale", "getconf",
     # Answering "is this installed at all"
-    "command", "hash",
+    "command",
     # Changing directory decides nothing on its own: 'cd /etc && cat hosts' is
     # still just a read, and 'cd /etc && rm -rf x' is still judged by the rm.
     "cd", "pushd", "popd",
 })
 
-# Tokens/substrings that make otherwise-safe commands mutating.
-# Keyed by command name; any occurrence of any value in the full command → require confirmed.
-# Note: awk is excluded entirely (its program text can contain system() calls which
-# are too complex to validate reliably — it goes straight to confirmed=true).
-_MUTATING_TOKENS: dict[str, tuple[str, ...]] = {
-    "sed":  ("-i", "--in-place"),
-    "curl": ("-x ", "--request ", "-d ", "--data", "--upload-file", "-t ",
-             "-f ", "--form", "--output", "-o "),
-    "wget": ("--post-data", "--post-file", "-o ", "--output-document",
-             "--ftp-user", "--execute"),
-    "find": ("-exec ", "-execdir ", "-delete", "-ok ", "-okdir ",
-             "-fprint", "-fprintf", "-fprint0", "-fls"),  # these write files
-    # Reading is fine (ip a, ip route show); changing addresses, routes or link
-    # state on a remote box is how you lock yourself out.
-    "ip": ("set ", "del ", "add ", "flush", "change ", "replace ", "append "),
-    # Reading journals is fine; these flags delete them.
-    "journalctl": ("--rotate", "--vacuum", "--flush", "--sync", "--relinquish-var"),
-    # dpkg -l lists what is installed, dpkg -i installs it. Same binary,
-    # opposite consequences, so the flag decides.
-    "dpkg": ("-i", "--install", "-r", "--remove", "-p ", "--purge",
-             "--unpack", "--configure", "--force"),
-    # Reading the clock and timezone is fine; setting either is not.
-    "timedatectl": ("set-",),
-}
-
-# Commands allowed only when no mutating token is present.
-_CONDITIONALLY_SAFE = frozenset(_MUTATING_TOKENS.keys())
-
-# Writing to /dev/null is not writing. 'curl -o /dev/null -w %{http_code}' is
-# how you read a status code and nothing else, and 'wget -O /dev/null' is how
-# you measure throughput. These are cut out of the command before the mutating
-# tokens above are looked for, so '-o /tmp/loot' still requires confirmation.
-_DEVNULL_SINK_RE = re.compile(r'(?:-o|--output|-O|--output-document)[=\s]+/dev/null\b')
+# For these commands flags and scripts decide between a read and a write:
+# 'sed -ni', 'curl -XPOST', 'ip l s eth0 down', 'git -c core.fsmonitor=...'.
+# The words are parsed per command in command_args.py. The substring search that
+# was here missed glued short options, GNU abbreviations and tabs (audit 12.10.2026).
+# wget is off the list: it writes a file by default, so it always asks.
+# awk is excluded entirely (its program text can contain system() calls).
+_ARG_CHECKS = command_args.CHECKS
 
 # Two-word prefixes for commands whose safety depends on the subcommand.
 # Only the listed subcommands are allowed without confirmation.
@@ -215,17 +192,12 @@ def validate_ssh_key_path(path: str) -> None:
 
 
 # git takes its global options before the subcommand, so 'git -C /srv/app log'
-# has '-C' where the allowlist expects 'log'. These are stripped first, which
-# is safe because none of them decide what the command does: -C and --git-dir
-# only say which repository, -c sets a config value for this run only. What the
-# command does is still the subcommand, and that is what gets checked.
-_GIT_GLOBAL_WITH_VALUE = frozenset({
-    "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path",
-})
-_GIT_GLOBAL_FLAGS = frozenset({
-    "--no-pager", "-P", "--paginate", "--bare", "--no-replace-objects",
-    "--literal-pathspecs", "--no-optional-locks",
-})
+# has '-C' where the allowlist expects 'log'. -C and --git-dir only say which
+# repository, so they are stripped to find the subcommand. -c and --exec-path are
+# refused before that (command_args.git_safe): core.fsmonitor, core.pager,
+# diff.external and core.sshCommand all name programs git will run.
+_GIT_GLOBAL_WITH_VALUE = command_args.GIT_GLOBAL_WITH_VALUE
+_GIT_GLOBAL_FLAGS = command_args.GIT_GLOBAL_FLAGS
 
 
 def _strip_git_globals(tokens: list[str]) -> list[str]:
@@ -244,14 +216,33 @@ def _strip_git_globals(tokens: list[str]) -> list[str]:
     return tokens[:1] + tokens[i:]
 
 
+def _tokens(cmd: str) -> list[str]:
+    """Shell words of one sub-command, quotes removed, tabs split like spaces.
+
+    Harmless redirects ('2>/dev/null', '2>&1') are blanked where the quote mask
+    sees them, before splitting. Deciding by the shape of a word after the quotes
+    were gone let "curl '>' -XPOST ..." swallow the -XPOST (audit 12.10.2026).
+    Redirects that write a file never get here: _writes_to_file refuses them.
+    """
+    mask, _ = _mask_quotes(cmd)
+    blanked = _blank_harmless_redirects(mask)
+    cleaned = "".join(" " if b == " " and m != " " else c for c, m, b in zip(cmd, mask, blanked))
+    try:
+        return shlex.split(cleaned, posix=True)
+    except ValueError:
+        return cleaned.split()
+
+
 def _is_subcommand_safe(cmd: str) -> bool:
     """Return True if a single shell command (no operators) is read-only safe."""
-    tokens = cmd.strip().split()
+    tokens = _tokens(cmd.strip())
     if not tokens:
         return True
     first = tokens[0].lower()
 
     if first == "git":
+        if not command_args.git_safe(tokens):
+            return False
         tokens = _strip_git_globals(tokens)
 
     # Longest prefix wins: three words before two, so that 'docker network ls'
@@ -266,15 +257,13 @@ def _is_subcommand_safe(cmd: str) -> bool:
         if two in _SAFE_TWO_WORD:
             return True
 
+    # Commands whose flags decide: parsed, not searched.
+    if first in _ARG_CHECKS:
+        return _ARG_CHECKS[first](tokens)
+
     # Unconditionally safe single-word commands
     if first in _SAFE_SINGLE:
         return True
-
-    # Conditionally safe: allowed only when no mutating tokens appear in the full cmd
-    if first in _CONDITIONALLY_SAFE:
-        cmd_lower = _DEVNULL_SINK_RE.sub(' ', cmd.lower())
-        mutating = _MUTATING_TOKENS[first]
-        return not any(tok in cmd_lower for tok in mutating)
 
     return False
 
@@ -675,6 +664,30 @@ def hard_deny_reason(sub_command: str) -> str | None:
     return None
 
 
+_BRACKET_CHAR_RE = re.compile(r"\[(\w)\]")
+
+
+def _pkill_self_match_reason(command: str) -> str | None:
+    """'[s]leep 300' does not match its own text, but it matches 'sleep 300' written
+    anywhere else in the same command line, and the shell running the command has that
+    whole line in its argv. On the stand this killed the ssh session (12.10.2026)."""
+    for sc in _split_shell_commands(command):
+        words = _tokens(sc)
+        for k, word in enumerate(words):
+            if word.rsplit("/", 1)[-1] not in ("pkill", "pgrep"):
+                continue
+            args = words[k + 1:]
+            full = "f" in _short_flags(args) or any(_long_opt(a, "--full") for a in args)
+            if not full:
+                continue
+            for pattern in (a for a in args if not a.startswith("-")):
+                literal = _BRACKET_CHAR_RE.sub(r"\1", pattern)
+                if literal != pattern and literal in command:
+                    return (f"{word} -f '{pattern}' is refused: '{literal}' also appears in this "
+                            "command, so the pattern matches the shell running it; kill by PID")
+    return None
+
+
 def validate_ssh_command(command: str, confirmed: bool) -> None:
     if len(command) > 500:
         raise ValueError("Command exceeds maximum length of 500 characters")
@@ -700,6 +713,9 @@ def validate_ssh_command(command: str, confirmed: bool) -> None:
         reason = hard_deny_reason(sc)
         if reason:
             raise PermissionError(f"Refused: {reason}")
+    reason = _pkill_self_match_reason(command)
+    if reason:
+        raise PermissionError(f"Refused: {reason}")
     # An interpreter anywhere in the pipeline turns every quoted string into code:
     # echo 'find /' | sh, printf ... | bash -s.
     if _INTERPRETER_RE.search(mask):
@@ -813,6 +829,40 @@ def validate_verify_command(command: str) -> None:
             "For anything else use ssh_exec."
         )
 
+    reason = _verify_args_reason(_tokens(stripped))
+    if reason:
+        raise PermissionError(f"verify_cmd {reason}. For anything else use ssh_exec.")
+
+
+def _verify_args_reason(t: list[str]) -> str | None:
+    """The prefix says which tool; its arguments decide whether it only tests.
+    Each case here passed the prefix check and acted (audit 12.10.2026): wp --exec
+    ran PHP, json.tool overwrote its second argument, postconf -e edited main.cf."""
+    if not t:
+        return None
+    head = t[0].rsplit("/", 1)[-1]
+    args = t[1:]
+    if head == "postconf":
+        if any("=" in a or (a.startswith("-") and a not in ("-n", "-d", "-h", "-x")) for a in args):
+            return "may only read postconf (-n, -d, names); -e, -X, -M and assignments edit main.cf"
+    elif head.startswith("php-fpm"):
+        if not any(a in ("-t", "-tt", "--test") for a in args):
+            return "must test php-fpm with -t; without it a second FPM master starts"
+    elif head in ("python", "python3") and args[:2] == ["-m", "json.tool"]:
+        if len([a for a in args[2:] if not a.startswith("-")]) > 1:
+            return "may pass json.tool one file; the second one is overwritten"
+    elif head == "yq":
+        if any(a in ("-i", "--inplace") or (a.startswith("-") and not a.startswith("--") and "i" in a[1:])
+               for a in args):
+            return "may not edit in place (yq -i)"
+    elif head == "wp":
+        if any(a.split("=", 1)[0] in ("--exec", "--require", "--ssh", "--http", "--eval") for a in args):
+            return "may not run PHP or reach another host through wp-cli global options"
+    elif head == "nginx":
+        if "-g" in args:
+            return "may not add directives with nginx -g (load_module loads code during the test)"
+    return None
+
 
 def validate_host_port(host: str, port: int) -> None:
     if not re.match(r'^[a-zA-Z0-9._-]+$', host):
@@ -861,6 +911,15 @@ _DB_DANGER_PATTERNS = re.compile(
 )
 
 
+# Called through SELECT, but they act: cut another session's connection, cancel its
+# query, make the server reread its config. Not writes, so a read-only transaction
+# lets them through; they need confirmation like any other action.
+_DB_ACTION_FUNCTIONS = re.compile(
+    r'\b(pg_terminate_backend|pg_cancel_backend|pg_reload_conf|pg_rotate_logfile|pg_promote)\s*\(',
+    re.IGNORECASE,
+)
+
+
 def _strip_sql_comments(query: str) -> str:
     result = query
     for pat in _DB_COMMENT_PATTERNS:
@@ -889,6 +948,12 @@ def validate_db_query(query: str, confirmed: bool) -> None:
         if _DB_DANGER_PATTERNS.search(cleaned):
             raise PermissionError(
                 f"Dangerous construct in SELECT query: {cleaned[:80]}"
+            )
+        action = _DB_ACTION_FUNCTIONS.search(cleaned)
+        if action and not confirmed:
+            raise ValueError(
+                f"{action.group(1)}() acts on the server and requires confirmation. "
+                "Repeat with confirmed=true after user approval."
             )
         return
 
