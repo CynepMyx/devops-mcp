@@ -455,6 +455,13 @@ def _mask_quotes(command: str) -> tuple[str, bool]:
             else:
                 out.append('x')
         else:  # inside double quotes
+            if c == "\\" and i + 1 < n:
+                # '\"' does not end the string. Missing this let 'echo "a\" b" ; touch x ;
+                # echo "c"' hide the middle as quoted data (third pass, 12.10.2026; also in 0.5.x).
+                out.append('x')
+                out.append('x')
+                i += 2
+                continue
             if c == '"':
                 state = None
                 out.append(' ')
@@ -591,7 +598,7 @@ def _rm_target_reason(target: str) -> str | None:
 
 
 _INTERPRETER_RE = re.compile(r"(?<![\w.-])(bash|sh|zsh|dash|ksh|eval|su|ssh|xargs)(?![\w.-])")
-_QUOTED_RE = re.compile(r"'([^']*)'|\"([^\"]*)\"")
+_QUOTED_RE = re.compile(r"'([^']*)'|\"((?:[^\"\\]|\\.)*)\"", re.DOTALL)
 _SPLIT_WORD_RE = re.compile(r"\w[\"']+\w")
 
 

@@ -208,6 +208,8 @@ NEEDS_CONFIRMATION = [
     "find /tmp -maxdepth 1 \\\n-delete",
     "dpkg \\\n-P nginx",
     'sed p "x" \\\n-i /tmp/f',
+    'echo "a\\" b" ; touch /tmp/pwned ; echo "c"',   # the mask closed the string at \"
+    'echo "a\\" b" && touch /tmp/pwned && echo "c"',
 ]
 
 READS = [
@@ -320,6 +322,8 @@ READS = [
     "curl -s example.com/dictionary",
     "sed -n '$p' /etc/hostname",
     "ping -c 3 -i 0.5 10.0.0.1",
+    'echo "say \\"hi\\"" ; uptime',
+    'grep -c "x\\\\" /etc/hostname',
     "curl -s -b 'sid=1' -H 'Accept: application/json' http://x/",
     "curl -s --header 'Host: x' --cookie a=b https://x/",
     "curl -s http:/x/",
@@ -356,3 +360,12 @@ def test_bracket_pattern_repeated_in_the_command_is_refused(cmd):
 @pytest.mark.parametrize("cmd", ['pkill -f "[s]leep 300"', 'pgrep -f "[r]un-all"'])
 def test_bracket_pattern_alone_still_works(cmd):
     validate_ssh_command(cmd, confirmed=True)
+
+
+@pytest.mark.parametrize("cmd", [
+    'echo "a\\" b" ; rm -rf /etc ; echo "c"',
+    'sh -c "x\\"; rm -rf /etc; \\""',
+])
+def test_escaped_quote_does_not_hide_a_hard_denial(cmd):
+    with pytest.raises(PermissionError):
+        validate_ssh_command(cmd, confirmed=True)
