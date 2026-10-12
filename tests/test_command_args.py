@@ -210,6 +210,7 @@ NEEDS_CONFIRMATION = [
     'sed p "x" \\\n-i /tmp/f',
     'echo "a\\" b" ; touch /tmp/pwned ; echo "c"',   # the mask closed the string at \"
     'echo "a\\" b" && touch /tmp/pwned && echo "c"',
+    "echo $'x\\'' ; touch /tmp/p ; echo 'y'",       # \' does not end $'...'
 ]
 
 READS = [
@@ -369,3 +370,22 @@ def test_bracket_pattern_alone_still_works(cmd):
 def test_escaped_quote_does_not_hide_a_hard_denial(cmd):
     with pytest.raises(PermissionError):
         validate_ssh_command(cmd, confirmed=True)
+
+
+@pytest.mark.parametrize("cmd", [
+    "bash -c $'rm -rf /et\\x63'",                 # \x63 is c to bash
+    "echo $'x\\'' ; rm -rf /etc ; echo 'y'",
+])
+def test_ansi_c_quoting_is_refused_even_when_confirmed(cmd):
+    with pytest.raises((ValueError, PermissionError)):
+        validate_ssh_command(cmd, confirmed=True)
+
+
+@pytest.mark.parametrize("cmd", ["echo '$x'", "echo \"it's $HOME\"", "grep -c '$' /etc/hostname"])
+def test_dollar_quote_inside_other_quotes_is_data(cmd):
+    validate_ssh_command(cmd, confirmed=True)
+
+
+@pytest.mark.parametrize("cmd", ["grep -c $'\\r' /etc/hostname", "grep -c $'\\t' /etc/hostname"])
+def test_plain_ansi_c_escapes_still_read(cmd):
+    validate_ssh_command(cmd, confirmed=False)

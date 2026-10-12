@@ -221,6 +221,42 @@ def _strip_git_globals(tokens: list[str]) -> list[str]:
     return tokens[:1] + tokens[i:]
 
 
+def _has_ansi_c_quote(command: str) -> bool:
+    """$'...' outside quotes with an escape other than \\r \\t \\n \\\\. Inside it a
+    backslash escapes a quote, so \\' does not end it, and \\x63 spells any character:
+    "echo $'x\\'' ; touch p ; echo 'y'" hid the touch from the quote mask, and
+    "bash -c $'rm -rf /et\\x63'" walked past the hard denials (third pass, 12.10.2026).
+    "grep -c $'\\r' .env" stays: those four neither end the string nor spell a letter."""
+    state = None
+    i, n = 0, len(command)
+    while i < n:
+        c = command[i]
+        if state == "'":
+            if c == "'":
+                state = None
+        elif c == "\\":
+            i += 2
+            continue
+        elif state == '"':
+            if c == '"':
+                state = None
+        elif c in "'\"":
+            state = c
+        elif c == "$" and command.startswith("'", i + 1):
+            j = i + 2
+            while j < n and command[j] != "'":
+                if command[j] == "\\":
+                    if command[j + 1:j + 2] not in ("r", "t", "n", "\\"):
+                        return True
+                    j += 2
+                    continue
+                j += 1
+            i = j + 1
+            continue
+        i += 1
+    return False
+
+
 def _join_continuations(cmd: str) -> str:
     """bash drops a backslash-newline outside single quotes, so 'sed p \\<newline>-i f'
     is 'sed p -i f'; shlex kept the newline inside the word and the -i was never seen
@@ -404,7 +440,7 @@ def is_read_only_command(command: str) -> bool:
     """
     try:
         mask, has_substitution = _mask_quotes(command)
-        if has_substitution or _writes_to_file(mask, command):
+        if has_substitution or _writes_to_file(mask, command) or _has_ansi_c_quote(command):
             return False
         return all(_is_subcommand_safe(sc) for sc in _split_shell_commands(command)
                    if sc.strip())
@@ -802,6 +838,9 @@ def validate_ssh_command(command: str, confirmed: bool) -> None:
     # Inside single quotes $( and ` are literal text, so config snippets pass.
     if has_substitution:
         raise ValueError("Shell injection pattern detected: command substitution")
+    if _has_ansi_c_quote(command):
+        raise PermissionError("Refused: ANSI-C quoting $'...' is not allowed: its escapes hide "
+                              "quotes and characters from the checks. Write the characters plainly.")
 
     # Block output redirection, but only outside quotes: '<b>' in an alert body
     # or a ';' in an nginx directive are data, not syntax. Merging descriptors
