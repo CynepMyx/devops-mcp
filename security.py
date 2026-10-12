@@ -221,6 +221,35 @@ def _strip_git_globals(tokens: list[str]) -> list[str]:
     return tokens[:1] + tokens[i:]
 
 
+def _join_continuations(cmd: str) -> str:
+    """bash drops a backslash-newline outside single quotes, so 'sed p \\<newline>-i f'
+    is 'sed p -i f'; shlex kept the newline inside the word and the -i was never seen
+    (third pass, 12.10.2026)."""
+    out: list[str] = []
+    state = None
+    i, n = 0, len(cmd)
+    while i < n:
+        c = cmd[i]
+        if state == "'":
+            if c == "'":
+                state = None
+        elif c == "\\":
+            if cmd.startswith("\n", i + 1):
+                i += 2
+                continue
+            out.append(cmd[i:i + 2])
+            i += 2
+            continue
+        elif state == '"':
+            if c == '"':
+                state = None
+        elif c in "'\"":
+            state = c
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def _tokens(cmd: str) -> list[str]:
     """Shell words of one sub-command, quotes removed, tabs split like spaces.
 
@@ -229,6 +258,7 @@ def _tokens(cmd: str) -> list[str]:
     were gone let "curl '>' -XPOST ..." swallow the -XPOST (audit 12.10.2026).
     Redirects that write a file never get here: _writes_to_file refuses them.
     """
+    cmd = _join_continuations(cmd)
     mask, _ = _mask_quotes(cmd)
     blanked = _blank_harmless_redirects(mask)
     cleaned = "".join(" " if b == " " and m != " " else c for c, m, b in zip(cmd, mask, blanked))
