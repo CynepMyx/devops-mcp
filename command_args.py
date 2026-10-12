@@ -238,28 +238,45 @@ def ip_safe(t):
 
 _CURL_VALUE_SHORT = set("AbcCdDeEFHKmoPQrtTuUwxXyYz")
 _CURL_UNSAFE_SHORT = set("dFTKcOQ")  # data, form, upload, config, cookie jar, remote name, ftp quote
-_CURL_UNSAFE_LONG = {
-    "data", "data-ascii", "data-binary", "data-raw", "data-urlencode", "json", "form", "form-string",
-    "upload-file", "remote-name", "remote-name-all", "remote-header-name", "cookie-jar", "trace",
-    "trace-ascii", "stderr", "libcurl", "etag-save", "hsts", "alt-svc", "config", "create-dirs",
-    "output-dir", "unix-socket", "abstract-unix-socket", "quote", "variable",
-}
 _CURL_SINKS = ("/dev/null", "-")
 _CURL_HTTP_URL = re.compile(r"^https?://", re.I)
-# Values of these options are not request targets, so they skip the URL check.
+# Long options are checked against what is known to be a read, not against a list of
+# writes: curl 8.3+ takes '--expand-<any option>', 8.12 added '--ssl-sessions FILE', and
+# curl 7.x takes any unambiguous prefix ('--max-ti'). Each of those was a way around a
+# deny-list (third pass, 12.10.2026), so an unknown name asks.
 _CURL_VALUE_LONG = {"proxy", "preproxy", "socks4", "socks4a", "socks5", "socks5-hostname", "doh-url",
                     "max-time", "connect-timeout", "resolve", "connect-to", "header", "user-agent",
                     "user", "referer", "retry", "retry-delay", "retry-max-time", "limit-rate", "range",
-                    "cacert", "cert", "key", "interface", "oauth2-bearer", "noproxy", "proxy-user",
-                    "ciphers", "cookie", "expect100-timeout", "keepalive-time", "dns-servers",
-                    "local-port", "speed-limit", "speed-time", "max-filesize", "max-redirs", "tls-max",
-                    "proto", "proto-redir", "happy-eyeballs-timeout-ms", "ip-tos", "write-out"}
+                    "cacert", "capath", "cert", "cert-type", "key", "key-type", "interface",
+                    "oauth2-bearer", "noproxy", "proxy-user", "ciphers", "tls13-ciphers", "curves",
+                    "cookie", "expect100-timeout", "keepalive-time", "dns-servers", "local-port",
+                    "speed-limit", "speed-time", "max-filesize", "max-redirs", "tls-max", "proto",
+                    "proto-redir", "happy-eyeballs-timeout-ms", "ip-tos", "time-cond", "url-query",
+                    "aws-sigv4", "pinnedpubkey", "proxy-cacert", "proxy-header"}
+_CURL_FLAG_LONG = {"silent", "show-error", "fail", "fail-with-body", "fail-early", "location",
+                   "location-trusted", "insecure", "head", "include", "show-headers", "verbose",
+                   "compressed", "http1.0", "http1.1", "http2", "http2-prior-knowledge", "http3",
+                   "http3-only", "ipv4", "ipv6", "globoff", "keepalive", "buffer", "progress-meter",
+                   "progress-bar", "path-as-is", "raw", "tcp-nodelay", "tlsv1", "tlsv1.0", "tlsv1.1",
+                   "tlsv1.2", "tlsv1.3", "ssl-no-revoke", "ssl-revoke-best-effort", "cert-status",
+                   "alpn", "npn", "sessionid", "digest", "basic", "ntlm", "negotiate", "anyauth",
+                   "retry-all-errors", "retry-connrefused", "ca-native", "proxy-insecure",
+                   "proxytunnel", "suppress-connect-headers", "tr-encoding", "disable",
+                   "disallow-username-in-url", "trace-time", "help", "version", "get", "ssl",
+                   "ssl-reqd", "netrc", "netrc-optional"}
+# With no scheme curl picks the protocol from the host name: 'dict.x:6379/info' is DICT,
+# and '--resolve dict.x:6379:127.0.0.1' points it at a local redis (curl 8.10, stand).
+_CURL_GUESSED_HOSTS = ("ftp.", "dict.", "ldap.", "imap.", "smtp.", "pop3.")
 
 
 def _curl_target_ok(tok: str) -> bool:
     # dict:// and gopher:// send raw bytes to local services (redis FLUSHALL), and a
-    # glob like '{dict,http}://' hides the scheme: only http(s) or no scheme at all.
-    return "://" not in tok or bool(_CURL_HTTP_URL.match(tok))
+    # glob like '{dict,http}://' hides the scheme: only http(s), or no scheme with a
+    # host curl will not read as another protocol and no glob that could build one.
+    if "://" in tok:
+        return bool(_CURL_HTTP_URL.match(tok))
+    host = tok.split("/", 1)[0].rsplit("@", 1)[-1].lower()
+    return not host.startswith(_CURL_GUESSED_HOSTS) and not any(ch in tok for ch in "{[")
 
 
 def _curl_write_out_safe(fmt: str) -> bool:
@@ -269,6 +286,8 @@ def _curl_write_out_safe(fmt: str) -> bool:
 
 
 def curl_safe(t):
+    if any("\n" in tok or "\r" in tok for tok in t):
+        return False  # a line break in a header or target writes a second request line
     i = 1
     while i < len(t):
         tok = t[i]
@@ -283,17 +302,17 @@ def curl_safe(t):
                     return False
                 if name == "write-out" and not _curl_write_out_safe(val):
                     return False
-            elif name in ("proto-default", "url"):
-                if name == "proto-default" or has_val:
-                    return False  # switches the scheme of every bare URL / curl rejects '='
+            elif name == "url":
+                if has_val:
+                    return False  # curl rejects '--url=', so do not guess what it would do
                 val, i = _value(t, i, "")
                 if not _curl_target_ok(val):
                     return False
-            elif name != "cookie" and _prefix_of_any(name, _CURL_UNSAFE_LONG | {
-                    "output", "dump-header", "request", "write-out"}):
-                return False  # an abbreviation, or a name we do not handle: ask
-            elif name in _CURL_VALUE_LONG and not has_val:
-                i += 1
+            elif name in _CURL_VALUE_LONG:
+                if not has_val:
+                    i += 1
+            elif not (name in _CURL_FLAG_LONG or (name.startswith("no-") and name[3:] in _CURL_FLAG_LONG)):
+                return False  # unknown, abbreviated or '--expand-...': ask
         elif tok.startswith("-") and len(tok) > 1:
             for j in range(1, len(tok)):
                 ch = tok[j]
@@ -560,6 +579,23 @@ def git_safe(t):
         positional = [a for a in rest if not a.startswith("-")]
         return not positional or positional[0] not in ("expire", "delete", "drop", "write")
     return True
+
+
+def compose_config_writes(args) -> bool:
+    """'docker compose config -o FILE' writes the rendered project to FILE (pflag: no
+    abbreviations, but short options cluster: '-qo FILE')."""
+    for tok in args:
+        if tok.startswith("--"):
+            name = tok[2:].split("=", 1)[0]
+            if name and "output".startswith(name):
+                return True
+        elif tok.startswith("-") and "o" in tok[1:]:
+            return True
+    return False
+
+
+def docker_compose_config_safe(t):
+    return not compose_config_writes(t[3:])
 
 
 CHECKS = {

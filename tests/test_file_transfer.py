@@ -120,6 +120,11 @@ def test_oversized_content_is_refused():
     "yq . /etc/app.yaml",
     "wp config get DB_NAME --path=/var/www/site",
     "nginx -T",
+    "nginx -t -q",
+    "sshd -t -f /etc/ssh/sshd_config",
+    "named-checkzone example.com /etc/bind/db.example",
+    "iptables-restore -t /etc/iptables/rules.v4",
+    "visudo -c -f /etc/sudoers.d/90-app",
 ])
 def test_config_tests_are_allowed(command):
     validate_verify_command(command)
@@ -144,6 +149,22 @@ def test_config_tests_are_allowed(command):
     "wp config get DB_NAME --exec=\"file_put_contents('/tmp/pwn','x');\"",
     "wp config get DB_NAME --require=/tmp/x.php",
     "nginx -t -g 'load_module /tmp/x.so;'",
+    # third pass (12.10.2026): each loads a module, runs a program or writes a file
+    "nginx -t -c /tmp/x.conf",
+    "nginx -t -e /tmp/err.log",
+    "apachectl -t -C 'LoadModule x /tmp/x.so'",
+    "httpd -t -f /tmp/x.conf",
+    "php-fpm8.2 -t -d extension=/tmp/x.so",
+    "docker compose config -o /tmp/x",
+    "docker-compose config --output /tmp/x",
+    "iptables-restore -t -M /tmp/x /etc/iptables/rules.v4",
+    "named-checkzone -o /tmp/x example.com /etc/bind/db.example",
+    "visudo -c -x /tmp/x",
+    "yq -s '.a' /etc/app.yaml",
+    "sshd -t -E /tmp/x",
+    "php -l -r 'echo 1;'",
+    "nginx -t ${X:--g}",
+    "nginx -t {-c,/tmp/x.conf}",
 ])
 def test_non_test_commands_are_refused(command):
     with pytest.raises((ValueError, PermissionError)):

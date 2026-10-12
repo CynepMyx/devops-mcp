@@ -128,7 +128,41 @@ ACTION_FUNCTIONS = [
     "SELECT pg_rotate_logfile()",
     "SELECT pg_promote()",
     "WITH s AS (SELECT pid FROM pg_stat_activity) SELECT pg_terminate_backend (pid) FROM s",
+    # third pass (12.10.2026): hidden from the comment stripper, or spelled another way
+    "SELECT '--', pg_terminate_backend(1)",
+    "SELECT 1 # 2, pg_terminate_backend(pid) FROM pg_stat_activity",
+    'SELECT "pg_terminate_backend"(1)',
+    'SELECT pg_catalog."pg_cancel_backend"(1)',
+    "SELECT U&\"\\0070g_terminate_backend\"(1)",
+    "SELECT query_to_xml('select pg_termi'||'nate_backend(1)', true, true, '')",
+    "SELECT dblink_exec('dbname=x', 'DELETE FROM t')",
+    "SELECT pg_switch_wal()",
+    "SELECT pg_drop_replication_slot('s')",
+    "SELECT pg_stat_statements_reset()",
 ]
+
+
+@pytest.mark.parametrize("query", [
+    "SELECT '#'; COMMIT; DELETE FROM t; COMMIT",   # deleted every row on mysql:8.0
+    "SELECT '--'; COMMIT; DELETE FROM t",
+    "SELECT 1 /* ; */; DELETE FROM t",
+])
+def test_statements_hidden_behind_a_comment_marker_are_refused(query):
+    from security import validate_db_query
+    with pytest.raises(ValueError, match="Multi-statement"):
+        validate_db_query(query, False)
+
+
+@pytest.mark.parametrize("query", [
+    "SELECT '#', 1 INTO OUTFILE '/var/lib/mysql-files/x'",   # wrote the file on mysql:8.0
+    "SELECT 1 /*! INTO OUTFILE '/var/lib/mysql-files/x' */",  # MySQL runs /*! */
+    "SELECT 1--1 INTO DUMPFILE '/tmp/x'",
+    "SELECT 1 INTO/**/OUTFILE '/tmp/x'",
+])
+def test_file_writes_hidden_from_the_stripper_are_refused(query):
+    from security import validate_db_query
+    with pytest.raises(PermissionError):
+        validate_db_query(query, False)
 
 
 @pytest.mark.parametrize("query", ACTION_FUNCTIONS)
@@ -143,6 +177,9 @@ def test_action_functions_need_confirmation(query):
     "SELECT pid, state, query FROM pg_stat_activity",
     "SELECT pg_read_binary_file('/etc/hostname')",
     "SELECT 'pg_terminate_backend is mentioned in a string'",
+    "SELECT slot_name, active FROM pg_replication_slots",
+    "SELECT * FROM pg_stat_activity -- who is connected",
+    "SELECT 1;",
 ])
 def test_reads_stay_free(query):
     from security import validate_db_query
