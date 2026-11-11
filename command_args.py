@@ -125,7 +125,7 @@ _NUMBER = re.compile(r"[+-]?\d+")
 
 
 def _allowed_opts(t, flags="", values="", long_flags=(), long_values=(), long_optional=(),
-                  numbers=False):
+                  numbers=False, value_last=False):
     """Allowlist check (0.6.2): every option must be named here, anything else is not a read.
 
     Short letters come from `flags` or `values` (a value letter takes the rest of the word
@@ -133,6 +133,9 @@ def _allowed_opts(t, flags="", values="", long_flags=(), long_values=(), long_op
     '--x=v' or the next word, `long_optional` only '--x' or '--x=v'. GNU abbreviations
     ask, the price of not knowing every option a program has. Other words are operands
     (files, units, filter words); with `numbers`, '-1' is an operand too (journalctl -b -1).
+    `value_last` is for programs with their own parser instead of getopt: a value letter
+    takes the next word and the letters after it still act ('tree -Lo 1 FILE' writes
+    FILE), so a value letter must end its word.
     The denylists this replaces passed any flag nobody had thought of yet.
     """
     i = 1
@@ -157,6 +160,8 @@ def _allowed_opts(t, flags="", values="", long_flags=(), long_values=(), long_op
                 if ch in values:
                     if j + 1 == len(tok):
                         i += 1
+                    elif value_last:
+                        return False
                     break
                 if ch not in flags:
                     return False
@@ -208,8 +213,9 @@ def uniq_safe(t):
 
 def tree_safe(t):
     # Not listed: -o writes a file, -R writes 00Tree.html into every directory it walks.
+    # tree parses its own options, not with getopt (see _allowed_opts, value_last).
     return _allowed_opts(
-        t, flags="adlfxqNQpugshDFvtcUriASnCXJ", values="LPIHT",
+        t, flags="adlfxqNQpugshDFvtcUriASnCXJ", values="LPIHT", value_last=True,
         long_flags=("noreport", "prune", "matchdirs", "metafirst", "si", "du", "inodes", "device",
                     "dirsfirst", "filesfirst", "ignore-case", "gitignore", "info", "nolinks",
                     "help", "version"),

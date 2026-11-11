@@ -204,6 +204,12 @@ UNLISTED_FUNCTIONS = [
     "SELECT pg_catalog.pg_ls_dir('/')",
     "SELECT count(*) FROM t WHERE id IN (SELECT my_func(1))",
     "SELECT /*!50000 sleep(5) */ 1",
+    # a call hidden by string syntax one server has and the plain '...' rule does not
+    r"SELECT '\'', sleep(5), ''",
+    "SELECT $$'$$, pg_ls_dir('/'), $$'$$",
+    r"SELECT E'\'', pg_ls_dir('/'), ''",
+    # the price of the quote-blind scan: '(' inside a literal asks
+    "SELECT name FROM t WHERE name LIKE 'foo(%'",
 ]
 
 FREE_READS_062 = [
@@ -213,7 +219,6 @@ FREE_READS_062 = [
     "SELECT pg_catalog.pg_size_pretty(pg_catalog.pg_total_relation_size('t'))",
     "SELECT relname, n_live_tup FROM pg_stat_user_tables ORDER BY n_live_tup DESC LIMIT 10",
     "SELECT date_trunc('day', created_at) d, count(*) FROM t GROUP BY 1 ORDER BY 1",
-    "SELECT name FROM t WHERE name LIKE 'foo(%'",
     "SELECT CAST(price AS DECIMAL(10,2)) FROM products",
     "SELECT row_number() OVER (PARTITION BY a ORDER BY b) FROM t",
     "WITH x AS (SELECT 1 AS n) SELECT n FROM x",

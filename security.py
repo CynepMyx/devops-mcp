@@ -1283,8 +1283,12 @@ def validate_db_query(query: str, confirmed: bool) -> None:
                 f"{action.group(1)}() acts on the server and requires confirmation. "
                 "Repeat with confirmed=true after user approval."
             )
-        # The stripped view and the raw one: MySQL runs what is inside /*! ... */.
-        unlisted = _unlisted_sql_functions(views[:2])
+        # All three views. The raw one because MySQL runs what is inside /*! ... */; the
+        # flat one, with every quote mark blanked, because no single string syntax
+        # matches both servers: MySQL's '\'' and Postgres $$...$$ and E'\'' all hid a
+        # call from the plain '...' rule (review of 0.6.2). The price: '(' inside a
+        # string literal asks too.
+        unlisted = _unlisted_sql_functions(views)
         if unlisted and not confirmed:
             names = ", ".join(f"{n}()" for n in sorted(unlisted)[:3])
             raise ValueError(
