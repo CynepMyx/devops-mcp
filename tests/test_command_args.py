@@ -506,3 +506,83 @@ def test_validator_stays_fast_on_long_adversarial_input(cmd):
     except (ValueError, PermissionError):
         pass
     assert time.perf_counter() - start < 0.5
+
+
+# --- 0.6.2: sort, tree, dmesg, ss, journalctl, find by allowlist ----------------------------
+
+NEEDS_CONFIRMATION_062 = [
+    # options nobody listed as dangerous still ask now
+    "sort -T /etc /var/log/syslog",
+    "sort --files0-from=/tmp/list",
+    "sort --compress-program=/tmp/x.sh -S 1 /var/log/syslog",
+    "sort --out=/tmp/x /etc/hosts",
+    "sort -o /tmp/x /etc/hosts",
+    "tree -o /tmp/x /etc",
+    "tree -R /var/www",
+    "tree --fromfile /tmp/list",
+    "dmesg -C",
+    "dmesg -n 1",
+    "dmesg --console-off",
+    "dmesg -L",
+    "ss -K dst 192.0.2.1",
+    "ss -D /tmp/dump",
+    "ss -F /tmp/filter",
+    "journalctl --rotate",
+    "journalctl --vacuum-time=1s",
+    "journalctl --vac=1s",
+    "journalctl --cursor-file=/tmp/c -u nginx",
+    "journalctl --setup-keys",
+    "journalctl --interval=1s",
+    "journalctl -b-1",
+    "find /var/www -maxdepth 2 -exec rm {} ;",
+    "find /var/www -maxdepth 2 -delete",
+    "find /var/www -maxdepth 2 -fprint /tmp/x",
+    "find /var/www -maxdepth 2 -files0-from /tmp/x",
+    "find /var/www -maxdepth 2 -name x stray-word",
+]
+
+READS_062 = [
+    "sort -rn",
+    "sort -k2,2n -t: /etc/passwd",
+    "sort -t '|' -k3 /tmp/x",
+    "sort -hr",
+    "sort -u /etc/hosts",
+    "sort --key=2 --numeric-sort --reverse /etc/hosts",
+    "sort -c /etc/hosts",
+    "tree -L 2 /etc/nginx",
+    "tree -a -I node_modules /var/www/app",
+    "dmesg -T",
+    "dmesg -T --level=err,warn",
+    "ss -tlnp",
+    "ss -Htn state established '( sport = :443 )'",
+    "ss -s",
+    "ss -xlp",
+    "journalctl -u nginx --since '1 hour ago' --no-pager",
+    "journalctl -u nginx --since -2h --until now -o cat --no-pager",
+    "journalctl -k -b -1 --no-pager",
+    "journalctl -n 50 -u ssh",
+    "journalctl -n50 -p err",
+    "journalctl -xe",
+    "journalctl -fu nginx",
+    "journalctl --list-boots",
+    "journalctl --disk-usage",
+    "journalctl -t sshd -S today -q",
+    "journalctl _SYSTEMD_UNIT=nginx.service --grep 'upstream' --no-pager",
+    "find /var/www -maxdepth 3 -name '*.php' -newermt '2026-11-01' -printf '%T+ %p\n'",
+    "find /var/log -maxdepth 2 -type f -size +100M",
+    "find /home -maxdepth 2 \( -name '*.sql' -o -name '*.gz' \) -mmin -1800",
+    "find /tmp -maxdepth 1 -user www-data -not -name '*.lock' -ls",
+    "find / -xdev -maxdepth 1 -type d",
+    "find . -maxdepth 1 -mtime -5 -print0",
+]
+
+
+@pytest.mark.parametrize("cmd", NEEDS_CONFIRMATION_062)
+def test_062_needs_confirmation(cmd):
+    with pytest.raises((ValueError, PermissionError)):
+        validate_ssh_command(cmd, confirmed=False)
+
+
+@pytest.mark.parametrize("cmd", READS_062)
+def test_062_reads_pass(cmd):
+    validate_ssh_command(cmd, confirmed=False)
