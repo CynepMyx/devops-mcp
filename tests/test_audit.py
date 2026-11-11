@@ -111,19 +111,30 @@ def test_key_field_holding_something_else_is_masked():
     assert server._sanitize_args({"key": "sk-live-abcdef"})["key"] == "***"
 
 
-def test_long_content_keeps_a_readable_head_and_a_hash():
-    body = "server {\n" + "x" * 5000
-    value = server._sanitize_args({"content": body})["content"]
-    assert value.startswith("server {"), "the head has to stay greppable"
-    assert len(value) < len(body), "the body itself must not be archived in the log"
-    assert "5009 chars" in value
+def test_file_content_is_stored_as_length_and_hash_only():
+    """0.6.1: a one-line sudo password put as a file was logged verbatim (17.10.2026)."""
+    for body in ("S3cret-pass!", "DB_PASSWORD=hunter2\n" + "x" * 5000):
+        value = server._sanitize_args({"content": body})["content"]
+        assert body[:6] not in value
+        assert value.startswith(f"<{len(body)} chars, sha256=")
+
+
+def test_other_long_values_keep_a_readable_head_and_a_hash():
+    query = "SELECT " + "x, " * 200 + "1"
+    value = server._sanitize_args({"query": query})["query"]
+    assert value.startswith("SELECT x, ")
     assert "sha256=" in value
 
 
+def test_password_fields_are_masked_whatever_their_prefix():
+    sanitized = server._sanitize_args({"jump_password": "p4ss", "password": "p4ss"})
+    assert sanitized == {"jump_password": "***", "password": "***"}
+
+
 def test_ssh_command_is_never_truncated():
-    """The validator caps commands at 500 chars; that is short enough to keep whole."""
+    """The validator caps commands at 1000 chars; that is short enough to keep whole."""
     command = "sed -i '" + "s/a/b/;" * 40 + "' /etc/nginx/nginx.conf"
-    assert 200 < len(command) < 500
+    assert 200 < len(command) < 1000
     assert server._sanitize_args({"command": command})["command"] == command
 
 

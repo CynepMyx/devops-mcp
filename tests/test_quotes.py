@@ -97,7 +97,7 @@ def test_read_only_variants_still_pass(command):
 
 def test_length_limit_still_enforced():
     with pytest.raises(ValueError):
-        validate_ssh_command("ls " + "a" * 600, confirmed=True)
+        validate_ssh_command("ls " + "a" * 1100, confirmed=True)
 
 
 # --- splitting ------------------------------------------------------------

@@ -94,8 +94,8 @@ class TestSshCommandConditionallyAllowlisted:
         "find /tmp -maxdepth 1 -fprint /tmp/out",
         "find /tmp -maxdepth 1 -fprintf /tmp/out %p",
         "find /tmp -maxdepth 1 -fls /tmp/out",
-        # awk: requires confirmed (can shell out via system())
-        "awk '{print}' file.txt",
+        # awk: anything beyond '[condition] {print fields}' (0.6.1) can shell out via system()
+        "awk '{system(\"id\")}' file.txt",
     ])
     def test_ambiguous_commands_require_confirmed(self, cmd):
         with pytest.raises(ValueError, match="confirmed"):
@@ -296,12 +296,14 @@ class TestChangeDirectory:
 
 class TestSshCommandLengthLimit:
     def test_too_long(self):
-        with pytest.raises(ValueError, match="500"):
-            validate_ssh_command("a" * 501, confirmed=False)
+        with pytest.raises(ValueError, match="1000"):
+            validate_ssh_command("a" * 1001, confirmed=False)
 
     def test_max_length_ok(self):
-        # 'uptime' repeated to fill under 500 chars is fine
-        validate_ssh_command("uptime", confirmed=False)
+        # 0.6.1: 500 was hit twice in real work; a read just under 1000 passes
+        cmd = "uptime" + "; cat /etc/hostname" * 52
+        assert 950 < len(cmd) <= 1000
+        validate_ssh_command(cmd, confirmed=False)
 
 
 # ---------------------------------------------------------------------------

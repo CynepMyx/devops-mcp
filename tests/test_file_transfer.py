@@ -33,6 +33,11 @@ def run(coro):
     "/home/deploy/.ssh/id_rsa",
     "/opt/app/certs/server.key",
     "/opt/app/certs/client.pem",
+    # 0.6.1: sshd host keys and FIDO-backed user keys
+    "/etc/ssh/ssh_host_ed25519_key",
+    "/etc/ssh/ssh_host_rsa_key",
+    "/root/.ssh/id_ed25519_sk",
+    "/home/deploy/.ssh/id_ecdsa_sk",
 ])
 def test_credential_paths_are_refused(path):
     with pytest.raises(PermissionError):
@@ -45,6 +50,8 @@ def test_credential_paths_are_refused(path):
     "/var/www/site/wp-config.php",
     "/opt/registry-infra/docker-compose.yml",
     "/etc/systemd/system/backup.timer",
+    "/etc/ssh/ssh_host_ed25519_key.pub",
+    "/etc/ssh/sshd_config",
 ])
 def test_config_paths_are_allowed(path):
     assert validate_remote_file_path(path) == path
