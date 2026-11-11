@@ -121,20 +121,89 @@ def date_safe(t):
     return True
 
 
+_NUMBER = re.compile(r"[+-]?\d+")
+
+
+def _allowed_opts(t, flags="", values="", long_flags=(), long_values=(), long_optional=(),
+                  numbers=False, value_last=False):
+    """Allowlist check (0.6.2): every option must be named here, anything else is not a read.
+
+    Short letters come from `flags` or `values` (a value letter takes the rest of the word
+    or the next word). Long options must match a name exactly: `long_values` take
+    '--x=v' or the next word, `long_optional` only '--x' or '--x=v'. GNU abbreviations
+    ask, the price of not knowing every option a program has. Other words are operands
+    (files, units, filter words); with `numbers`, '-1' is an operand too (journalctl -b -1).
+    `value_last` is for programs with their own parser instead of getopt: a value letter
+    takes the next word and the letters after it still act ('tree -Lo 1 FILE' writes
+    FILE), so a value letter must end its word.
+    The denylists this replaces passed any flag nobody had thought of yet.
+    """
+    i = 1
+    while i < len(t):
+        tok = t[i]
+        if tok == "--":
+            return True
+        if numbers and _NUMBER.fullmatch(tok):
+            pass
+        elif tok.startswith("--") and len(tok) > 2:
+            name, _, has_val = _long_name(tok)
+            if name in long_values:
+                if not has_val:
+                    i += 1
+            elif name in long_optional or (name in long_flags and not has_val):
+                pass
+            else:
+                return False
+        elif tok.startswith("-") and len(tok) > 1:
+            for j in range(1, len(tok)):
+                ch = tok[j]
+                if ch in values:
+                    if j + 1 == len(tok):
+                        i += 1
+                    elif value_last:
+                        return False
+                    break
+                if ch not in flags:
+                    return False
+        i += 1
+    return True
+
+
 def dmesg_safe(t):
-    # -c/-C clear the ring buffer, -D/-E/-n change console logging.
-    return _flags_only(t, "flsF", "cCDEn",
-                       unsafe_long=("clear", "read-clear", "console-off", "console-on", "console-level"))
+    # Not listed, so they ask: -c/-C clear the ring buffer, -D/-E/-n change console logging.
+    return _allowed_opts(
+        t, flags="HTtkuxdePrwWSJp", values="flsF",
+        long_flags=("human", "ctime", "notime", "kernel", "userspace", "decode", "show-delta",
+                    "reltime", "nopager", "raw", "follow", "follow-new", "syslog", "json",
+                    "force-prefix", "noescape", "help", "version"),
+        long_values=("facility", "level", "buffer-size", "file", "time-format", "since", "until"),
+        long_optional=("color",))
 
 
 def ss_safe(t):
-    # -K kills sockets, -D writes a diagnostic dump to a file.
-    return _flags_only(t, "fAFN", "KD", unsafe_long=("kill", "diag"))
+    # Not listed: -K kills sockets, -D writes a diagnostic dump, -F reads a filter file.
+    return _allowed_opts(
+        t, flags="hVHOnraloempTisEZzb460tMSudwx", values="NfA",
+        long_flags=("help", "version", "no-header", "oneline", "numeric", "resolve", "all",
+                    "listening", "options", "extended", "memory", "processes", "threads", "info",
+                    "tos", "cgroup", "tipcinfo", "summary", "events", "context", "contexts", "bpf",
+                    "ipv4", "ipv6", "packet", "tcp", "mptcp", "sctp", "udp", "dccp", "raw", "unix",
+                    "vsock", "tipc", "xdp", "inet-sockopt", "bpf-maps"),
+        long_values=("net", "family", "query", "socket"))
 
 
 def sort_safe(t):
-    # -o writes a file; --compress-program runs one.
-    return _flags_only(t, "ktST", "o", unsafe_long=("output", "compress-program"))
+    # Not listed: -o writes a file, --compress-program runs one, -T picks where temp
+    # files go, --files0-from and --random-source read files.
+    return _allowed_opts(
+        t, flags="bdfgiMhnRrVcCmsuz", values="kSt",
+        long_flags=("ignore-leading-blanks", "dictionary-order", "ignore-case",
+                    "general-numeric-sort", "ignore-nonprinting", "month-sort",
+                    "human-numeric-sort", "numeric-sort", "random-sort", "reverse",
+                    "version-sort", "merge", "stable", "unique", "zero-terminated", "debug",
+                    "help", "version"),
+        long_values=("key", "field-separator", "buffer-size", "parallel", "sort"),
+        long_optional=("check",))
 
 
 def uniq_safe(t):
@@ -143,8 +212,14 @@ def uniq_safe(t):
 
 
 def tree_safe(t):
-    # -o writes a file; -R writes 00Tree.html into every directory it walks.
-    return _flags_only(t, "LPIHT", "oR", unsafe_long=("output",))
+    # Not listed: -o writes a file, -R writes 00Tree.html into every directory it walks.
+    # tree parses its own options, not with getopt (see _allowed_opts, value_last).
+    return _allowed_opts(
+        t, flags="adlfxqNQpugshDFvtcUriASnCXJ", values="LPIHT", value_last=True,
+        long_flags=("noreport", "prune", "matchdirs", "metafirst", "si", "du", "inodes", "device",
+                    "dirsfirst", "filesfirst", "ignore-case", "gitignore", "info", "nolinks",
+                    "help", "version"),
+        long_values=("charset", "filelimit", "timefmt", "sort", "gitfile", "infofile"))
 
 
 def ping_safe(t):
@@ -174,12 +249,41 @@ def timedatectl_safe(t):
         "status", "show", "timesync-status", "show-timesync", "list-timezones")
 
 
-_FIND_ACTIONS = {"-exec", "-execdir", "-ok", "-okdir", "-delete",
-                 "-fprint", "-fprintf", "-fprint0", "-fls"}
+# find: an allowlist of the expression (0.6.2). Not listed, so they ask: -exec, -execdir,
+# -ok, -okdir, -delete, -fprint, -fprint0, -fprintf, -fls, -files0-from.
+_FIND_LEADING = {"-H", "-L", "-P"}
+_FIND_NO_ARG = {
+    "-empty", "-readable", "-writable", "-executable", "-nouser", "-nogroup", "-xdev", "-mount",
+    "-follow", "-depth", "-d", "-daystart", "-noleaf", "-ignore_readdir_race",
+    "-noignore_readdir_race", "-print", "-print0", "-ls", "-prune", "-quit", "-true", "-false",
+    "-not", "!", "-a", "-and", "-o", "-or", "(", ")", ",", "-help", "--help", "-version",
+    "--version",
+}
+_FIND_ONE_ARG = {
+    "-maxdepth", "-mindepth", "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename",
+    "-lname", "-ilname", "-regex", "-iregex", "-regextype", "-type", "-xtype", "-size", "-mtime",
+    "-mmin", "-atime", "-amin", "-ctime", "-cmin", "-used", "-newer", "-anewer", "-cnewer",
+    "-user", "-group", "-uid", "-gid", "-perm", "-links", "-inum", "-samefile", "-fstype",
+    "-printf", "-context",
+}
+_FIND_NEWER_XY = re.compile(r"-newer[aBcmt][aBcmt]")
 
 
 def find_safe(t):
-    return not any(tok in _FIND_ACTIONS for tok in t[1:])
+    i = 1
+    while i < len(t) and t[i] in _FIND_LEADING:
+        i += 1
+    while i < len(t) and not t[i].startswith("-") and t[i] not in ("(", "!", ")", ","):
+        i += 1  # starting points
+    while i < len(t):
+        tok = t[i]
+        if tok in _FIND_ONE_ARG or _FIND_NEWER_XY.fullmatch(tok):
+            i += 2  # the value may start with '-': -mtime -5, -size -1000k
+            continue
+        if tok not in _FIND_NO_ARG:
+            return False
+        i += 1
+    return True
 
 
 _DPKG_READ = {"-l", "--list", "-L", "--listfiles", "-s", "--status", "-S", "--search", "-p",
@@ -193,19 +297,23 @@ def dpkg_safe(t):
     return all(tok.split("=", 1)[0] in _DPKG_READ for tok in t[1:] if tok.startswith("-"))
 
 
-_JOURNALCTL_ACTIONS = ("rotate", "vacuum-size", "vacuum-files", "vacuum-time", "flush", "sync",
-                       "relinquish-var", "smart-relinquish-var", "setup-keys", "update-catalog",
-                       "cursor-file",  # writes the last cursor into the file it names
-                       "image")  # mounts a disk image
-
-
 def journalctl_safe(t):
-    for tok in t[1:]:
-        if tok.startswith("--") and len(tok) > 2:
-            name, _, _ = _long_name(tok)
-            if _prefix_of_any(name, _JOURNALCTL_ACTIONS):
-                return False
-    return True
+    # Not listed, so they ask: --rotate, --vacuum-*, --flush, --sync, --relinquish-var,
+    # --setup-keys, --update-catalog, --cursor-file (writes the cursor) and --image (mounts).
+    # -b and -n take an optional value, so they are flags here and '-b -1' or '-n 50'
+    # leave a number behind as an operand.
+    return _allowed_opts(
+        t, flags="aefrqxlmhkNbn0123456789", values="utpoSUgDMFc",  # digits: -n50, -b-1 asks
+        long_flags=("no-pager", "all", "pager-end", "follow", "reverse", "quiet", "catalog", "full",
+                    "no-full", "merge", "help", "version", "dmesg", "list-boots", "disk-usage",
+                    "utc", "no-hostname", "system", "user", "fields", "header", "no-tail",
+                    "show-cursor", "list-catalog", "verify"),
+        long_values=("unit", "user-unit", "identifier", "exclude-identifier", "priority", "facility",
+                     "output", "output-fields", "since", "until", "grep", "directory", "file",
+                     "machine", "field", "cursor", "after-cursor", "root", "namespace",
+                     "invocation"),
+        long_optional=("boot", "lines", "case-sensitive"),
+        numbers=True)
 
 
 # --- ip ----------------------------------------------------------------------------------

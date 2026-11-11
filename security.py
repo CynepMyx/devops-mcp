@@ -1138,6 +1138,98 @@ _DB_ACTION_FUNCTIONS = re.compile(
 # U&"\0070g_..." spells any identifier with escapes, so no name check can see it.
 _DB_UNICODE_ESCAPE = re.compile(r"\bU&['\"]", re.IGNORECASE)
 
+# Functions a read query may call without confirmation (0.6.2). The list above names the
+# functions known to act; this one names the functions known not to, so one nobody
+# listed (pg_read_binary_file, pg_ls_dir, lo_get, set_config, pg_sleep, a user-defined
+# public.f()) asks instead of passing. Schema-qualified calls pass only from pg_catalog
+# or information_schema.
+_DB_READ_FUNCTIONS = frozenset({
+    # aggregates and window functions
+    "count", "sum", "avg", "min", "max", "string_agg", "array_agg", "group_concat", "json_agg",
+    "jsonb_agg", "json_object_agg", "bool_and", "bool_or", "every", "stddev", "stddev_pop",
+    "stddev_samp", "variance", "var_pop", "var_samp", "percentile_cont", "percentile_disc", "mode",
+    "row_number", "rank", "dense_rank", "percent_rank", "cume_dist", "ntile", "lag", "lead",
+    "first_value", "last_value", "nth_value", "grouping",
+    # conditionals and casts
+    "coalesce", "nullif", "greatest", "least", "if", "ifnull", "isnull", "nvl", "cast", "convert",
+    # strings
+    "length", "char_length", "character_length", "octet_length", "bit_length", "lower", "upper",
+    "initcap", "trim", "ltrim", "rtrim", "btrim", "substr", "substring", "left", "right", "replace",
+    "concat", "concat_ws", "position", "strpos", "locate", "instr", "split_part", "lpad", "rpad",
+    "repeat", "reverse", "regexp_replace", "regexp_matches", "regexp_match", "regexp_like",
+    "regexp_substr", "format", "quote_ident", "quote_literal", "quote_nullable", "md5", "sha1",
+    "sha2", "crc32", "encode", "decode", "hex", "unhex", "ascii", "chr", "char", "to_hex",
+    "translate", "starts_with", "field", "find_in_set", "match", "against",
+    # numbers
+    "abs", "round", "floor", "ceil", "ceiling", "trunc", "truncate", "mod", "power", "pow", "sqrt",
+    "exp", "ln", "log", "log10", "sign", "div", "random", "rand",
+    # dates
+    "now", "date", "time", "timestamp", "date_trunc", "date_part", "extract", "to_char",
+    "to_date", "to_timestamp", "to_number", "age", "date_format", "from_unixtime",
+    "unix_timestamp", "timestampdiff", "timestampadd", "datediff", "date_add", "date_sub",
+    "adddate", "subdate", "str_to_date", "year", "month", "day", "dayofmonth", "dayofweek",
+    "dayofyear", "weekday", "week", "hour", "minute", "second", "last_day", "makedate",
+    "make_date", "make_timestamp", "sysdate", "curdate", "curtime", "current_timestamp",
+    "utc_timestamp", "utc_date", "clock_timestamp", "statement_timestamp", "transaction_timestamp",
+    "timeofday", "justify_interval",
+    # json, arrays, sets
+    "json_extract", "json_unquote", "json_length", "json_keys", "json_contains", "json_type",
+    "json_valid", "json_object", "json_array", "json_build_object", "json_build_array",
+    "jsonb_build_object", "to_json", "to_jsonb", "row_to_json", "json_each", "jsonb_each",
+    "json_array_elements", "jsonb_array_elements", "jsonb_extract_path_text",
+    "json_extract_path_text", "jsonb_pretty", "jsonb_typeof", "unnest", "generate_series",
+    "array_length", "array_to_string", "string_to_array", "cardinality", "array_position",
+    # server and catalog information
+    "version", "database", "schema", "user", "current_user", "session_user", "current_database",
+    "current_schema", "current_schemas", "current_setting", "connection_id", "found_rows",
+    "last_insert_id", "row_count", "pg_backend_pid", "inet_server_addr", "inet_client_addr",
+    "pg_postmaster_start_time", "pg_conf_load_time", "pg_is_in_recovery", "pg_size_pretty",
+    "pg_database_size", "pg_relation_size", "pg_total_relation_size", "pg_table_size",
+    "pg_indexes_size", "pg_column_size", "pg_size_bytes", "pg_current_wal_lsn",
+    "pg_last_wal_receive_lsn", "pg_last_wal_replay_lsn", "pg_wal_lsn_diff",
+    "pg_last_xact_replay_timestamp", "pg_get_viewdef", "pg_get_indexdef", "pg_get_constraintdef",
+    "pg_get_functiondef", "pg_get_triggerdef", "pg_get_userbyid", "pg_get_expr",
+    "pg_get_serial_sequence", "pg_blocking_pids", "pg_typeof", "format_type", "obj_description",
+    "col_description", "shobj_description", "has_table_privilege", "has_database_privilege",
+    "has_schema_privilege", "has_column_privilege", "pg_has_role", "to_regclass",
+    "txid_current_if_assigned", "inet_ntoa", "inet_aton", "inet6_ntoa", "inet6_aton",
+})
+
+# Words that are followed by '(' without being a call.
+_SQL_PAREN_KEYWORDS = frozenset({
+    "in", "exists", "values", "as", "over", "filter", "any", "all", "some", "array", "row", "not",
+    "and", "or", "on", "using", "from", "join", "where", "select", "by", "when", "then", "else",
+    "is", "like", "ilike", "between", "interval", "distinct", "group", "union", "intersect",
+    "except", "lateral", "index", "binary", "having", "limit", "offset", "case", "with",
+    "recursive", "table", "partition", "rows", "range", "only", "escape", "collate", "cube",
+    "rollup", "sets", "materialized", "within", "returns", "of",
+    # type parameters: varchar(255), numeric(10,2), CAST(x AS DECIMAL(10,2))
+    "varchar", "nvarchar", "character", "numeric", "decimal", "float", "double", "bit",
+    "varbinary", "datetime", "int", "integer", "bigint", "smallint", "tinyint", "signed",
+    "unsigned", "real", "precision", "varying", "zone",
+})
+_SQL_IDENT = r'(?:"[^"\n]*"|`[^`\n]*`|[A-Za-z_][\w$]*)'
+# The lookbehind starts a match only at the beginning of a name: starting inside one
+# made a long word without '(' quadratic.
+_SQL_CALL = re.compile(rf"(?<![\w$.\"`])({_SQL_IDENT}(?:\s*\.\s*{_SQL_IDENT})*)\s*\(")
+_SQL_STRING = re.compile(r"'(?:[^']|'')*'")
+
+
+def _unlisted_sql_functions(views) -> set[str]:
+    """Calls in a read query that are not on _DB_READ_FUNCTIONS, as written."""
+    found = set()
+    for view in views:
+        for m in _SQL_CALL.finditer(_SQL_STRING.sub("''", view)):
+            parts = [p.strip().strip('"`').lower() for p in re.split(r"\s*\.\s*", m.group(1))]
+            name = parts[-1]
+            schema = parts[-2] if len(parts) > 1 else None
+            if schema is None and name in _SQL_PAREN_KEYWORDS:
+                continue
+            if name in _DB_READ_FUNCTIONS and schema in (None, "pg_catalog", "information_schema"):
+                continue
+            found.add(".".join(parts))
+    return found
+
 
 def _strip_sql_comments(query: str) -> str:
     result = query
@@ -1189,6 +1281,18 @@ def validate_db_query(query: str, confirmed: bool) -> None:
         if action and not confirmed:
             raise ValueError(
                 f"{action.group(1)}() acts on the server and requires confirmation. "
+                "Repeat with confirmed=true after user approval."
+            )
+        # All three views. The raw one because MySQL runs what is inside /*! ... */; the
+        # flat one, with every quote mark blanked, because no single string syntax
+        # matches both servers: MySQL's '\'' and Postgres $$...$$ and E'\'' all hid a
+        # call from the plain '...' rule (review of 0.6.2). The price: '(' inside a
+        # string literal asks too.
+        unlisted = _unlisted_sql_functions(views)
+        if unlisted and not confirmed:
+            names = ", ".join(f"{n}()" for n in sorted(unlisted)[:3])
+            raise ValueError(
+                f"{names} not on the list of read-only SQL functions; requires confirmation. "
                 "Repeat with confirmed=true after user approval."
             )
         return

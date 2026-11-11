@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.2] - 2026-11-11
+
+### Security
+- `sort`, `tree`, `dmesg`, `ss`, `journalctl` and `find` are checked against an allowlist of options instead of a list of known-dangerous ones. The denylists passed any option nobody had thought of, and every review pass found another (`sort --compress-program`, `find -fprint`, `journalctl --image`). Now an option that is not listed asks for confirmation: for example `sort -T /etc`, `tree --fromfile`, `journalctl --interval`, `find -files0-from`, all of which passed on 0.6.1. Long options must be spelled out, so GNU abbreviations (`--vac=1s`) ask too. `find` checks its whole expression: starting points, then listed tests and operators, each value taken as the value even when it starts with `-` (`-mtime -5`).
+- Functions in a read-only SQL query come from an allowlist (aggregates, string, number, date and JSON functions, catalog and size lookups). Anything else asks: `pg_read_binary_file`, `pg_ls_dir`, `pg_stat_file`, `lo_get`, `set_config`, `pg_sleep`, a user-defined `public.f()`, calls in quotes or under `/*! */`. Schema-qualified calls pass only from `pg_catalog` and `information_schema`. `pg_read_binary_file` was listed in a test as a free read before; it now asks like the rest. Calls are looked for with every quote mark blanked too: a first version skipped string literals by the plain `'...'` rule and missed calls hidden by syntax only one server has (MySQL `'\''`, Postgres `$$...$$` and `E'\''`), found in review before merge. The price is that `(` inside a string literal (`LIKE 'foo(%'`) asks.
+- `tree` parses its own options rather than with getopt: a value letter takes the next word and the letters after it still act, so `tree -Lo 1 /tmp/x /etc` wrote `/tmp/x` and passed as a read since 0.6.0 (the old check treated the `o` as the value of `-L`). A value letter must now end its word.
+
+### Changed
+- Replayed against the audit log (8 593 distinct `ssh_exec` commands, 14 `db_query` queries): no decision changed in either direction, so the allowlists cover everything actually used. A probe confirmed that the new code is the one being tested: the five forms above passed on 0.6.1 and ask on 0.6.2.
+
 ## [0.6.1] - 2026-11-11
 
 Leftovers of the 0.6.0 audit and requests from live work on client servers. Each security item was reproduced against the running 0.6.0 in its own image first.

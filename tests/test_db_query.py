@@ -178,7 +178,6 @@ def test_action_functions_need_confirmation(query):
 
 @pytest.mark.parametrize("query", [
     "SELECT pid, state, query FROM pg_stat_activity",
-    "SELECT pg_read_binary_file('/etc/hostname')",
     "SELECT 'pg_terminate_backend is mentioned in a string'",
     "SELECT slot_name, active FROM pg_replication_slots",
     "SELECT * FROM pg_stat_activity -- who is connected",
@@ -187,3 +186,66 @@ def test_action_functions_need_confirmation(query):
 def test_reads_stay_free(query):
     from security import validate_db_query
     validate_db_query(query, False)
+
+
+# --- 0.6.2: functions in a read query come from an allowlist ------------------------------
+
+UNLISTED_FUNCTIONS = [
+    # pg_read_binary_file was listed as a free read before 0.6.2; it now asks like any
+    # other function nobody put on the list.
+    "SELECT pg_read_binary_file('/etc/hostname')",
+    "SELECT pg_ls_dir('/etc')",
+    "SELECT pg_stat_file('/etc/passwd')",
+    "SELECT lo_get(16400)",
+    "SELECT set_config('log_statement', 'all', false)",
+    "SELECT pg_sleep(600)",
+    "SELECT public.cleanup_sessions()",
+    "SELECT \"pg_ls_dir\"('/')",
+    "SELECT pg_catalog.pg_ls_dir('/')",
+    "SELECT count(*) FROM t WHERE id IN (SELECT my_func(1))",
+    "SELECT /*!50000 sleep(5) */ 1",
+    # a call hidden by string syntax one server has and the plain '...' rule does not
+    r"SELECT '\'', sleep(5), ''",
+    "SELECT $$'$$, pg_ls_dir('/'), $$'$$",
+    r"SELECT E'\'', pg_ls_dir('/'), ''",
+    # the price of the quote-blind scan: '(' inside a literal asks
+    "SELECT name FROM t WHERE name LIKE 'foo(%'",
+]
+
+FREE_READS_062 = [
+    "SELECT count(*) FROM wp_posts",
+    "SELECT COUNT(DISTINCT user_id), MAX(created_at) FROM orders WHERE status IN ('a', 'b')",
+    "SELECT pg_size_pretty(pg_database_size(current_database()))",
+    "SELECT pg_catalog.pg_size_pretty(pg_catalog.pg_total_relation_size('t'))",
+    "SELECT relname, n_live_tup FROM pg_stat_user_tables ORDER BY n_live_tup DESC LIMIT 10",
+    "SELECT date_trunc('day', created_at) d, count(*) FROM t GROUP BY 1 ORDER BY 1",
+    "SELECT CAST(price AS DECIMAL(10,2)) FROM products",
+    "SELECT row_number() OVER (PARTITION BY a ORDER BY b) FROM t",
+    "WITH x AS (SELECT 1 AS n) SELECT n FROM x",
+    "SELECT * FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.id = t.id)",
+    "SELECT option_value FROM wp_options WHERE option_name = 'siteurl'",
+    "SHOW VARIABLES LIKE 'max_connections'",
+    "SELECT IFNULL(a, 0), DATE_FORMAT(NOW(), '%Y') FROM t",
+]
+
+
+@pytest.mark.parametrize("query", UNLISTED_FUNCTIONS)
+def test_unlisted_functions_need_confirmation(query):
+    from security import validate_db_query
+    with pytest.raises(ValueError, match="confirmation"):
+        validate_db_query(query, False)
+    validate_db_query(query, True)
+
+
+@pytest.mark.parametrize("query", FREE_READS_062)
+def test_listed_functions_stay_free(query):
+    from security import validate_db_query
+    validate_db_query(query, False)
+
+
+def test_function_scan_stays_fast_on_a_long_word():
+    import time
+    from security import validate_db_query
+    start = time.perf_counter()
+    validate_db_query("SELECT " + "a" * 200000, False)
+    assert time.perf_counter() - start < 0.5
