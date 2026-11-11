@@ -220,7 +220,7 @@ which key or password was used, and a password is stored only as a hash. Set
 ## Editing Remote Files
 
 `ssh_exec` runs everything through a shell, so writing a config with it means fighting
-quoting rules and a 500 character ceiling. `file_get` / `file_put` use SFTP instead —
+quoting rules and a 1000 character ceiling. `file_get` / `file_put` use SFTP instead —
 the bytes travel as bytes.
 
 ```

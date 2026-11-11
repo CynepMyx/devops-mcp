@@ -400,7 +400,7 @@ _TOOLS = [
                 "user": {"type": "string", "description": "SSH username"},
                 "key": {"type": "string", "description": "Path to SSH key on VPS, e.g. /app/keys/client.pem"},
                 "password": {"type": "string", "description": "SSH password (alternative to key)"},
-                "command": {"type": "string", "description": "Command to execute (max 500 chars, no shell injection)"},
+                "command": {"type": "string", "description": "Command to execute (max 1000 chars, no shell injection)"},
                 "timeout": {"type": "integer", "description": "Timeout in seconds (default 30, max 120)"},
                 "confirmed": {"type": "boolean", "description": "Set to true to allow commands outside the read-only allowlist, after explicit user approval"},
                 "jump_host": {"type": "string", "description": "Reach the target through this host (SSH ProxyJump). The jump host only carries the traffic; authentication with the target happens end to end inside the tunnel."},
@@ -561,30 +561,39 @@ _SENSITIVE_KEYS = {"password", "passwd", "secret", "token"}
 # a secret, because some future tool will put one there.
 _KEY_PATH_PREFIX = "/app/keys/"
 
-# file_put sends whole config files. Storing them verbatim would turn the audit
-# log into a config archive, so long values keep a readable head plus the length
-# and hash of the whole thing.
+# file_put content is never stored, only its length and hash: short files are often
+# secrets (a sudo password put on a client server as a one-line file landed in the
+# log verbatim, 17.10.2026), and the head of a config holds its credentials as often
+# as anything else.
+_CONTENT_KEYS = {"content"}
+
+# Other long values keep a readable head plus the length and hash of the whole thing.
 _MAX_AUDIT_VALUE = 200
 
 # Fields the validator already bounds. ssh_exec is 72% of all calls and its
-# commands are capped at 500 chars; truncating those would trade a log that
+# commands are capped at 1000 chars; truncating those would trade a log that
 # lies for a log that cannot be read.
 _LENGTH_EXEMPT = {"command"}
 
 
+def _digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8", "replace")).hexdigest()[:12]
+
+
 def _sanitize_value(name: str, value):
     lowered = name.lower()
-    if lowered in _SENSITIVE_KEYS:
+    if any(word in lowered for word in _SENSITIVE_KEYS):  # jump_password too
         return "***"
     if lowered == "key":
         if isinstance(value, str) and value.startswith(_KEY_PATH_PREFIX):
             return value
         return "***"
+    if lowered in _CONTENT_KEYS and isinstance(value, str):
+        return f"<{len(value)} chars, sha256={_digest(value)}>"
     if lowered in _LENGTH_EXEMPT:
         return value
     if isinstance(value, str) and len(value) > _MAX_AUDIT_VALUE:
-        digest = hashlib.sha256(value.encode("utf-8", "replace")).hexdigest()[:12]
-        return f"{value[:_MAX_AUDIT_VALUE]}... <{len(value)} chars, sha256={digest}>"
+        return f"{value[:_MAX_AUDIT_VALUE]}... <{len(value)} chars, sha256={_digest(value)}>"
     return value
 
 

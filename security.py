@@ -62,6 +62,8 @@ _SAFE_SINGLE = frozenset({
     # File reading. less/more excluded for the same reason as top: they are pagers.
     "cat", "head", "tail", "wc", "sort", "uniq", "cut",
     "grep", "egrep", "fgrep",
+    # Rotated logs (gzip -dc never writes a file) and a stdin-to-stdout filter.
+    "zcat", "zgrep", "tr",
     # Filesystem inspection (read-only, no -exec/-delete)
     "ls", "ll", "stat", "file", "du", "lsblk", "tree",
     # Kernel / system logs. journalctl moved to conditionally safe: --rotate and
@@ -98,7 +100,8 @@ _SAFE_SINGLE = frozenset({
 # The words are parsed per command in command_args.py. The substring search that
 # was here missed glued short options, GNU abbreviations and tabs (audit 12.10.2026).
 # wget is off the list: it writes a file by default, so it always asks.
-# awk is excluded entirely (its program text can contain system() calls).
+# awk passes only as '[condition] {print fields}' (command_args.awk_safe): its
+# language has system(), getline from a command and print > file.
 _ARG_CHECKS = command_args.CHECKS
 
 # Two-word prefixes for commands whose safety depends on the subcommand.
@@ -828,9 +831,12 @@ def _pkill_self_match_reason(command: str) -> str | None:
     return None
 
 
+MAX_COMMAND_CHARS = 1000
+
+
 def validate_ssh_command(command: str, confirmed: bool) -> None:
-    if len(command) > 500:
-        raise ValueError("Command exceeds maximum length of 500 characters")
+    if len(command) > MAX_COMMAND_CHARS:
+        raise ValueError(f"Command exceeds maximum length of {MAX_COMMAND_CHARS} characters")
 
     mask, has_substitution = _mask_quotes(command)
 
@@ -900,6 +906,8 @@ _FILE_DENY_PREFIX = ("/etc/sudoers.d/", "/proc/", "/sys/", "/dev/")
 _FILE_DENY_NAMES = frozenset({
     "authorized_keys", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
 })
+# sshd host keys and FIDO-backed user keys (id_ecdsa_sk, id_ed25519_sk); .pub stays readable.
+_FILE_DENY_GLOBS = ("ssh_host_*_key", "id_*_sk")
 _FILE_DENY_SUFFIX = (".pem", ".key", ".pfx", ".p12")
 
 
@@ -917,7 +925,8 @@ def validate_remote_file_path(path: str) -> str:
     normalized = str(PurePosixPath(path))
     name = PurePosixPath(normalized).name
 
-    if normalized in _FILE_DENY_EXACT or name in _FILE_DENY_NAMES:
+    if (normalized in _FILE_DENY_EXACT or name in _FILE_DENY_NAMES
+            or any(fnmatch.fnmatchcase(name, g) for g in _FILE_DENY_GLOBS)):
         raise PermissionError(f"Refusing to touch credential file: {path}")
     if name.endswith(_FILE_DENY_SUFFIX):
         raise PermissionError(f"Refusing to touch key material: {path}")
