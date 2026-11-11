@@ -756,7 +756,12 @@ _AWK_FIELD = r"\$(?:\d+|NF|\(NF-\d+\))"
 _AWK_ITEM = rf"(?:{_AWK_FIELD}|NR|NF|FILENAME|{_AWK_STR})"
 _AWK_COND = (rf"(?:{_AWK_RE}|(?:{_AWK_FIELD}|NR|NF)\s*(?:==|!=|<=|>=|<|>|~|!~)\s*"
              rf"(?:-?\d+|{_AWK_STR}|{_AWK_RE}))")
-_AWK_ACTION = rf"\{{\s*print(?:\s+{_AWK_ITEM}(?:\s*,?\s*{_AWK_ITEM})*)?\s*;?\s*\}}"
+# Each run of blanks belongs to exactly one place: '\s*,?\s*' between items let two
+# quantifiers share the same spaces, and a failing match retried every split, which is
+# exponential in the number of items (18 fields hung the validator). The separator is
+# atomic, so it is tried once.
+_AWK_SEP = r"(?>\s*,\s*|\s*)"
+_AWK_ACTION = rf"\{{\s*print(?:\s+{_AWK_ITEM}(?:{_AWK_SEP}{_AWK_ITEM})*)?\s*(?:;\s*)?\}}"
 _AWK_PROGRAM = re.compile(rf"\s*(?:{_AWK_COND}\s*{_AWK_ACTION}|{_AWK_COND}|{_AWK_ACTION})\s*")
 
 

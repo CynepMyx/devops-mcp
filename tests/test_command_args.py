@@ -486,3 +486,23 @@ def test_061_needs_confirmation(cmd):
 @pytest.mark.parametrize("cmd", READS_061)
 def test_061_reads_pass(cmd):
     validate_ssh_command(cmd, confirmed=False)
+
+
+@pytest.mark.parametrize("cmd", [
+    "awk '{print" + " $1 " * 120 + " @}' /etc/hosts",
+    "awk '{print" + " $1  " * 100 + "}' /etc/hosts",
+    "echo '" + "{a," * 240 + "'",
+    "grep " + "\"\\\"" * 300,
+    "cat " + "${x:-" * 150,
+    "ls " + " " * 990,
+])
+def test_validator_stays_fast_on_long_adversarial_input(cmd):
+    """0.6.1: '\s*,?\s*' in the awk grammar backtracked exponentially (18 fields hung)."""
+    import time
+    cmd = cmd[:1000]
+    start = time.perf_counter()
+    try:
+        validate_ssh_command(cmd, confirmed=False)
+    except (ValueError, PermissionError):
+        pass
+    assert time.perf_counter() - start < 0.5
