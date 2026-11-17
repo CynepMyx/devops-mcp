@@ -31,6 +31,7 @@ import paramiko
 from security import (
     MAX_FILE_BYTES,
     parse_jump,
+    parse_ssh_port,
     strict_host_key_default,
     validate_remote_file_path,
     validate_ssh_key_path,
@@ -56,7 +57,7 @@ class ConnectionLostMidWrite(Exception):
 
 
 def _pooled(host, user, key_path, password, timeout, verify_host_key, work,
-            retry=True, jump=None):
+            retry=True, jump=None, port=22):
     """Run `work(client, sftp)` on a pooled connection, opening SFTP for it.
 
     Only connection-level failures are retried. An SFTP error about a missing
@@ -71,7 +72,7 @@ def _pooled(host, user, key_path, password, timeout, verify_host_key, work,
     """
     for attempt in (1, 2) if retry else (1,):
         entry, reused = ssh_pool.acquire(
-            host, user, key_path, password or "", timeout=timeout,
+            host, user, key_path, password or "", port=port, timeout=timeout,
             verify_host_key=verify_host_key, jump=jump,
         )
         try:
@@ -168,7 +169,7 @@ def _refuse_real_path(path: str, real: str) -> dict | None:
 
 
 def _get_sync(host, user, key_path, password, timeout, verify_host_key,
-              path, max_bytes, jump=None) -> dict:
+              path, max_bytes, jump=None, port=22) -> dict:
     def work(client, sftp):
         real = _real_path(sftp, path)
         refused = _refuse_real_path(path, real)
@@ -181,7 +182,7 @@ def _get_sync(host, user, key_path, password, timeout, verify_host_key,
         return st, data, truncated, real
 
     outcome, meta = _pooled(host, user, key_path, password, timeout,
-                            verify_host_key, work, jump=jump)
+                            verify_host_key, work, jump=jump, port=port)
     if isinstance(outcome, dict):
         return {**outcome, **meta}
     st, data, truncated, real = outcome
@@ -286,7 +287,7 @@ def _write_atomic(sftp, path: str, payload: bytes, target_mode: int,
 
 def _put_sync(host, user, key_path, password, timeout, verify_host_key,
               path, payload: bytes, mode, backup, dry_run,
-              verify_cmd=None, rollback=True, jump=None) -> dict:
+              verify_cmd=None, rollback=True, jump=None, port=22) -> dict:
     warnings: list[str] = []
     # Written from inside work(), read after a connection failure so the error
     # can tell the user where the previous content is.
@@ -426,7 +427,7 @@ def _put_sync(host, user, key_path, password, timeout, verify_host_key,
 
     try:
         summary, meta = _pooled(host, user, key_path, password, timeout,
-                                verify_host_key, work, retry=False, jump=jump)
+                                verify_host_key, work, retry=False, jump=jump, port=port)
     except (paramiko.SSHException, EOFError, ConnectionError) as exc:
         if progress["stage"] == "not started":
             raise
@@ -451,6 +452,7 @@ async def file_get(args: dict) -> dict:
     max_bytes = min(int(args.get("max_bytes", MAX_FILE_BYTES)), MAX_FILE_BYTES)
     try:
         host, user, key_path, password, timeout, verify_host_key, jump = _common_args(args)
+        port = parse_ssh_port(args.get("port"))
         if not path_arg:
             raise ValueError("Parameter 'path' is required")
         path = validate_remote_file_path(path_arg)
@@ -461,7 +463,7 @@ async def file_get(args: dict) -> dict:
     try:
         result = await asyncio.wait_for(
             asyncio.to_thread(_get_sync, host, user, key_path, password, timeout,
-                              verify_host_key, path, max_bytes, jump),
+                              verify_host_key, path, max_bytes, jump, port=port),
             timeout=timeout + 5,
         )
     except asyncio.TimeoutError:
@@ -491,6 +493,7 @@ async def file_put(args: dict) -> dict:
 
     try:
         host, user, key_path, password, timeout, verify_host_key, jump = _common_args(args)
+        port = parse_ssh_port(args.get("port"))
         if not path_arg:
             raise ValueError("Parameter 'path' is required")
         if content is None:
@@ -528,7 +531,7 @@ async def file_put(args: dict) -> dict:
         result = await asyncio.wait_for(
             asyncio.to_thread(_put_sync, host, user, key_path, password, timeout,
                               verify_host_key, path, payload, mode, backup, dry_run,
-                              verify_cmd or None, rollback, jump),
+                              verify_cmd or None, rollback, jump, port=port),
             # The verification and a possible rollback each need their own round
             # trip after the write, so the outer deadline has to allow for them.
             timeout=timeout * 3 + 15,

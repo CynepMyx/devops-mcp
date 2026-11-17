@@ -397,6 +397,7 @@ _TOOLS = [
             "type": "object",
             "properties": {
                 "host": {"type": "string", "description": "Remote host IP or hostname"},
+                "port": {"type": "integer", "description": "SSH port on the target (default 22). jump_port is the jump host's own port."},
                 "user": {"type": "string", "description": "SSH username"},
                 "key": {"type": "string", "description": "Path to SSH key on VPS, e.g. /app/keys/client.pem"},
                 "password": {"type": "string", "description": "SSH password (alternative to key)"},
@@ -446,6 +447,7 @@ _TOOLS = [
             "type": "object",
             "properties": {
                 "host": {"type": "string", "description": "Remote host IP or hostname"},
+                "port": {"type": "integer", "description": "SSH port on the target (default 22). jump_port is the jump host's own port."},
                 "user": {"type": "string", "description": "SSH username"},
                 "key": {"type": "string", "description": "Path to SSH key on VPS, e.g. /app/keys/vps.pem"},
                 "password": {"type": "string", "description": "SSH password (alternative to key)"},
@@ -482,6 +484,7 @@ _TOOLS = [
             "type": "object",
             "properties": {
                 "host": {"type": "string", "description": "Remote host IP or hostname"},
+                "port": {"type": "integer", "description": "SSH port on the target (default 22). jump_port is the jump host's own port."},
                 "user": {"type": "string", "description": "SSH username"},
                 "key": {"type": "string", "description": "Path to SSH key on VPS, e.g. /app/keys/vps.pem"},
                 "password": {"type": "string", "description": "SSH password (alternative to key)"},

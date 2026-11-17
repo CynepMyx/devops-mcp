@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.3] - 2026-11-17
+
+### Added
+- `ssh_exec`, `file_get` and `file_put` take `port`, the SSH port on the target (default 22, must be 1-65535; `true` is refused rather than read as port 1). Three VMs behind one address with SSH forwarded on 2202, 2203 and 2204 could not be reached at all: the only way in was plain `ssh` from the host, outside the command checks and the audit log. `jump_port` stays what it was, the port of the jump host. `ssh_exec` results now include the port.
+
+### Fixed
+- Host keys for a server on a port other than 22 are looked up as `[host]:port`, the way `known_hosts` lists them. The connection hands paramiko a ready socket and never told it the port, so in strict mode such a server would have been checked against its bare address and refused. The pool already kept ports apart; a test now holds it to that.
+
 ## [0.6.2] - 2026-11-11
 
 ### Security
