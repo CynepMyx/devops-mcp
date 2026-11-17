@@ -102,8 +102,11 @@ def _connect(host, port, user, key_path, password, timeout, verify_host_key,
     if sock is None:
         sock = socket.create_connection((host, port), timeout=timeout)
         sock.settimeout(timeout)
+    # port= matters even with a ready socket: paramiko looks the host key up as
+    # '[host]:port' only when told the port, so without it a server on 2203 was
+    # checked against the bare address and refused in strict mode.
     connect_kwargs = dict(
-        hostname=host, sock=sock, username=user, timeout=timeout,
+        hostname=host, port=port, sock=sock, username=user, timeout=timeout,
         auth_timeout=timeout, banner_timeout=timeout,
         look_for_keys=False, allow_agent=False,
     )

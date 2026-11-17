@@ -157,6 +157,11 @@ cat /etc/ssh/ssh_host_ed25519_key.pub
 port, which is exactly what host key checking exists to catch. Read the key from the
 machine through access you already have, or from the provider's console.
 
+A server on another port (`ssh_exec`, `file_get` and `file_put` take `port`, default 22)
+is listed with the port, the way OpenSSH writes it: `[203.0.113.7]:2203 ssh-ed25519 AAAA...`.
+Several machines behind one address with SSH forwarded on different ports are separate
+entries and separate pooled connections.
+
 > The `known_hosts` file is mounted read-only into the container and gitignored — it
 > never ends up in source control.
 

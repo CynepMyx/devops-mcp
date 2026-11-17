@@ -15,6 +15,8 @@ import pytest
 
 from tools import ssh_pool
 
+REAL_CONNECT = ssh_pool._connect
+
 
 class FakeTransport:
     def __init__(self, active=True):
@@ -81,6 +83,41 @@ def test_password_is_not_stored_in_the_pool_key(clean_pool):
     credential = ssh_pool.status()["connections"][0]["credential"]
     assert "hunter2" not in credential
     assert credential.startswith("pw:")
+
+
+def test_two_ports_on_one_host_never_share_a_connection(clean_pool):
+    """One address, three VMs behind it on 2202-2204: each port is its own server."""
+    a, _ = ssh_pool.acquire("94.26.229.189", "root", "/app/keys/a.pem", port=2202)
+    b, reused = ssh_pool.acquire("94.26.229.189", "root", "/app/keys/a.pem", port=2203)
+    assert a is not b and not reused
+    assert len(clean_pool) == 2
+
+
+def test_connect_tells_paramiko_the_port_so_known_hosts_matches(monkeypatch, tmp_path):
+    """paramiko looks a host key up as '[host]:port' only when it is told the port.
+    We hand it a ready socket, so without port= it checked the bare address and
+    strict mode refused a host listed as [94.26.229.189]:2203."""
+    seen = {}
+
+    class FakeSSHClient:
+        def load_host_keys(self, path):
+            pass
+
+        def set_missing_host_key_policy(self, policy):
+            pass
+
+        def connect(self, **kwargs):
+            seen.update(kwargs)
+
+        def get_transport(self):
+            return None
+
+    monkeypatch.setattr(ssh_pool.paramiko, "SSHClient", FakeSSHClient)
+    monkeypatch.setattr(ssh_pool.socket, "create_connection",
+                        lambda addr, timeout=None: type("S", (), {"settimeout": lambda self, t: None})())
+    REAL_CONNECT("94.26.229.189", 2203, "root", "/app/keys/a.pem", "", 5, True)
+    assert seen["port"] == 2203
+    assert seen["hostname"] == "94.26.229.189"
 
 
 def test_a_dead_connection_is_replaced(clean_pool):

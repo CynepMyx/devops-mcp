@@ -383,6 +383,33 @@ def test_a_dropped_connection_does_not_replay_the_write(monkeypatch):
     assert "already in place" in result["error"]
 
 
+def test_target_port_reaches_the_pool(monkeypatch):
+    from tools import ssh_pool
+
+    store = {"/etc/hosts": b"127.0.0.1 localhost\n"}
+    counter = {"passes": 0}
+    seen = {}
+
+    def fake_acquire(*a, **kw):
+        seen["port"] = kw.get("port")
+        return _FakeEntry(store, counter), False
+
+    monkeypatch.setattr(ssh_pool, "acquire", fake_acquire)
+    monkeypatch.setattr(ssh_pool, "touch", lambda entry: None)
+    run(file_get({**HOST, "path": "/etc/hosts", "port": 2203}))
+    assert seen["port"] == 2203
+    run(file_get({**HOST, "path": "/etc/hosts"}))
+    assert seen["port"] == 22
+
+
+@pytest.mark.parametrize("value", [0, 70000, "x", False])
+def test_a_bad_target_port_is_refused_before_connecting(value):
+    result = run(file_put({**HOST, "path": "/etc/nginx/nginx.conf", "content": "x",
+                           "dry_run": True, "port": value}))
+    assert result["outcome"] == "refused"
+    assert "port" in result["error"].lower()
+
+
 def test_key_outside_the_keys_directory_is_refused():
     result = run(file_get({"host": "192.0.2.1", "user": "root",
                            "key": "/home/oleg/.ssh/id_rsa", "path": "/etc/hosts"}))

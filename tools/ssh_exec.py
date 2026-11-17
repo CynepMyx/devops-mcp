@@ -9,6 +9,7 @@ import paramiko
 from security import (
     is_read_only_command,
     parse_jump,
+    parse_ssh_port,
     strict_host_key_default,
     validate_ssh_command,
     validate_ssh_key_path,
@@ -42,6 +43,7 @@ def _run_ssh(
     password: str = None,
     verify_host_key: bool = False,
     jump: dict = None,
+    port: int = 22,
 ) -> dict:
     start = time.monotonic()
 
@@ -55,7 +57,7 @@ def _run_ssh(
 
     for attempt in (1, 2):
         entry, reused = ssh_pool.acquire(
-            host, user, key_path, password or "", timeout=timeout,
+            host, user, key_path, password or "", port=port, timeout=timeout,
             verify_host_key=verify_host_key, jump=jump,
         )
         stdout = None
@@ -102,6 +104,7 @@ def _run_ssh(
     duration_ms = round((time.monotonic() - start) * 1000)
     result = {
         "host": host,
+        "port": port,
         "command": command,
         "stdout": out,
         "stderr": err,
@@ -146,6 +149,7 @@ async def ssh_exec(args: dict) -> dict:
         if key_path:
             validate_ssh_key_path(key_path)
         validate_ssh_command(command, confirmed)
+        port = parse_ssh_port(args.get("port"))
         jump = parse_jump(args, ALLOW_SSH_PASSWORD, strict)
     except (ValueError, PermissionError) as e:
         return {"error": str(e), "outcome": "refused"}
@@ -154,7 +158,7 @@ async def ssh_exec(args: dict) -> dict:
         return await asyncio.wait_for(
             asyncio.to_thread(
                 _run_ssh, host, user, key_path, command, timeout, password or None,
-                verify_host_key, jump,
+                verify_host_key, jump, port,
             ),
             timeout=timeout + 5,
         )

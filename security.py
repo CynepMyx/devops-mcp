@@ -396,6 +396,22 @@ def _is_subcommand_safe(cmd: str) -> bool:
     return False
 
 
+def parse_ssh_port(value, name: str = "port") -> int:
+    """An SSH port from tool arguments: missing means 22, anything else must be 1-65535.
+
+    bool is refused on purpose: True is an int in Python and would quietly become port 1.
+    """
+    if value is None:
+        return 22
+    if isinstance(value, bool):
+        raise ValueError(f"Parameter '{name}' must be a port number, got {value!r}")
+    if isinstance(value, str) and value.strip().isdigit():
+        value = int(value.strip())
+    if not isinstance(value, int) or not 1 <= value <= 65535:
+        raise ValueError(f"Parameter '{name}' must be a port number 1-65535, got {value!r}")
+    return value
+
+
 def parse_jump(args: dict, allow_password: bool, strict_default: bool = False) -> dict | None:
     """Read jump_* parameters into the shape ssh_pool expects, or None.
 

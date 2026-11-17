@@ -152,6 +152,55 @@ def test_normal_output_is_untouched(clients):
     assert result["exit_code"] == 0
 
 
+def _call_ssh_exec(monkeypatch, **extra):
+    """Run the tool entry point with _run_ssh replaced; return what reached it."""
+    seen = {}
+
+    def fake_run(host, user, key, command, timeout, password, verify_host_key, jump, port):
+        seen["port"] = port
+        return {"ok": True}
+
+    monkeypatch.setattr(ssh_exec, "_run_ssh", fake_run)
+    import asyncio
+    result = asyncio.run(ssh_exec.ssh_exec({"host": "h", "user": "u", "key": "/app/keys/k.pem",
+                                            "command": "uptime", **extra}))
+    return result, seen
+
+
+def test_target_port_defaults_to_22(monkeypatch):
+    _, seen = _call_ssh_exec(monkeypatch)
+    assert seen["port"] == 22
+
+
+def test_target_port_reaches_the_connection(monkeypatch):
+    """17.11.2026: three VMs behind one address, SSH forwarded on 2202-2204. With no
+    port parameter the only way in was plain ssh from the VPS, outside the checks
+    and the audit."""
+    _, seen = _call_ssh_exec(monkeypatch, port=2203)
+    assert seen["port"] == 2203
+
+
+@pytest.mark.parametrize("value", [0, -1, 65536, "abc", True, 22.5, ""])
+def test_a_bad_target_port_is_refused(value, monkeypatch):
+    result, seen = _call_ssh_exec(monkeypatch, port=value)
+    assert result.get("outcome") == "refused"
+    assert "port" not in seen
+
+
+def test_run_ssh_opens_the_connection_on_the_given_port(clients, monkeypatch):
+    ports = []
+    real = ssh_pool._connect
+
+    def spy(host, port, *rest, **kwargs):
+        ports.append(port)
+        return real(host, port, *rest, **kwargs)
+
+    monkeypatch.setattr(ssh_pool, "_connect", spy)
+    result = ssh_exec._run_ssh("h", "u", "/app/keys/k.pem", "uptime", 5, port=2204)
+    assert ports == [2204]
+    assert result["port"] == 2204
+
+
 @pytest.mark.parametrize("value", [0, -5])
 def test_timeout_is_at_least_one_second(value, monkeypatch):
     seen = {}
